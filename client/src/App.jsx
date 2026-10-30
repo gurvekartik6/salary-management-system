@@ -701,12 +701,6 @@ function UploadsPage() {
               ))}
             </div>
           )}
-          {selected.status === "submitted" && (
-            <Alert
-              error="This document is linked to a campaign and is locked. Use the campaign version workflow instead of reprocessing the source file."
-              onClose={() => {}}
-            />
-          )}
         </section>
       </div>
       {selected && (
@@ -727,6 +721,12 @@ function UploadsPage() {
               <X size={18} />
             </button>
           </div>
+          {selected.status === "submitted" && (
+            <Alert
+              error="This document is linked to a campaign and is locked. Use the campaign version workflow instead of reprocessing the source file."
+              onClose={() => {}}
+            />
+          )}
           {selected.status === "processing" ||
           selected.status === "uploaded" ? (
             <p className="helper-text">
@@ -896,7 +896,7 @@ function EditableRecord({ record, onSave, showSalary = false }) {
             {saving ? "Saving…" : "Save"}
           </button>
 
-          {admin && !r.excluded && (
+          {!r.excluded && (
             <button
               type="button"
               className="button button-ghost button-small"
@@ -907,7 +907,7 @@ function EditableRecord({ record, onSave, showSalary = false }) {
             </button>
           )}
 
-          {admin && r.excluded && (
+          {r.excluded && (
             <button
               type="button"
               className="button button-ghost button-small"

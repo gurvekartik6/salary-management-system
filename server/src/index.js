@@ -1,4 +1,5 @@
 
+import dns from 'node:dns';
 import dotenv from 'dotenv';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -32,6 +33,20 @@ if (envResult.error) {
 }
 
 console.info(`Environment loaded from: ${envPath}`);
+
+const configuredDnsServers = String(
+  process.env.MONGODB_DNS_SERVERS || ''
+)
+  .split(',')
+  .map(server => server.trim())
+  .filter(Boolean);
+
+if (configuredDnsServers.length > 0) {
+  dns.setServers(configuredDnsServers);
+  console.info(
+    `Custom DNS servers configured for MongoDB SRV resolution: ${configuredDnsServers.join(', ')}`
+  );
+}
 
 const { connectDatabase } = await import('./config/db.js');
 const { runRetentionTasks } = await import(

@@ -14,7 +14,7 @@ export async function connectDatabase() {
 
   try {
     const collections = await mongoose.connection.db.listCollections(
-      { name: { $in: ['employees', 'employeeimports'] } },
+      { name: /^(employees|employeeimports)$/ },
       { nameOnly: true }
     ).toArray();
     for (const collection of collections) {
