@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+client/dist
+server/private-uploads
+server/private-reports
+server/public-assets
+private-backups
+*.zip

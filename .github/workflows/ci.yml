@@ -1,0 +1,32 @@
+name: SGGS application checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package.json
+            server/package.json
+            client/package.json
+      - name: Resolve dependencies
+        run: npm install --no-audit --no-fund
+      - name: Check server syntax
+        run: npm run check
+      - name: Run unit tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      - name: Check backup scripts
+        run: bash -n scripts/backup.sh scripts/restore.sh
+      - name: Build production container
+        run: docker build --tag sggs-salary-notification-system:${{ github.sha }} .

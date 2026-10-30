@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+coverage/
+*.log
+server/private-uploads/
+server/private-reports/
+.DS_Store
+server/public-assets/
+private-backups/
+*.sggsbackup
+*.meta
+*.sha256

@@ -1,0 +1,4 @@
+staffId,name,salaryAmount,salaryPeriod,language
+DEMO0001,Sample Employee,1000.00,October 2026,en
+DEMO0002,Sample Employee Marathi,1000.00,October 2026,mr
+DEMO0003,Sample Employee Hindi,1000.00,October 2026,hi

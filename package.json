@@ -1,0 +1,32 @@
+{
+  "name": "sggs-salary-notification-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "College-only salary notification management system for SGGS",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm --workspace server run dev",
+    "dev:client": "npm --workspace client run dev",
+    "build": "npm --workspace client run build",
+    "start": "npm --workspace server start",
+    "lint:server": "npm --workspace server run check",
+    "seed:admin": "npm --workspace server run seed:admin",
+    "test": "npm --workspace server test",
+    "check": "npm --workspace server run check"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "csv-stringify": "^6.9.0",
+    "pdfkit": "^0.20.2",
+    "twilio": "^6.2.0"
+  }
+}
