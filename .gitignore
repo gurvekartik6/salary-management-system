@@ -18,3 +18,5 @@ csv
 server/server
 server/server/private-uploads
 server/server/private-reports
+server/private-files/
+server/private-files
