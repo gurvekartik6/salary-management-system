@@ -37,6 +37,23 @@ const allowedTypes = [
   'operations-pdf'
 ];
 
+function normalizeDate(value, label, endOfDay = false) {
+  if (value === undefined || value === null || value === '') return undefined;
+
+  const date = new Date(String(value));
+  if (!Number.isFinite(date.getTime())) {
+    const error = new Error(`${label} must be a valid date`);
+    error.status = 400;
+    throw error;
+  }
+
+  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
+    date.setUTCHours(23, 59, 59, 999);
+  }
+
+  return date.toISOString();
+}
+
 router.post('/', reportLimiter, async (req, res, next) => {
   try {
     const type = String(req.body?.type || 'campaign-pdf');
@@ -52,12 +69,28 @@ router.post('/', reportLimiter, async (req, res, next) => {
       return res.status(403).json({ error: 'This report type is admin-only' });
     }
 
-    const filters =
+    const requestedFilters =
       req.body?.filters && typeof req.body.filters === 'object'
         ? req.body.filters
         : {};
 
+    const filters = {
+      ...requestedFilters,
+      from: normalizeDate(requestedFilters.from, 'Start date'),
+      to: normalizeDate(requestedFilters.to, 'End date', true)
+    };
+
+    if (filters.from && filters.to && filters.from > filters.to) {
+      return res.status(400).json({
+        error: 'Start date must be before or equal to end date'
+      });
+    }
+
     if (filters.campaignId) {
+      if (!mongoose.Types.ObjectId.isValid(filters.campaignId)) {
+        return res.status(400).json({ error: 'Invalid campaignId' });
+      }
+
       const campaign = await Campaign.findOne({
         _id: filters.campaignId
       }).select('_id').lean();

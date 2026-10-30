@@ -4,7 +4,8 @@ import {
   Campaign,
   DispatchOutbox,
   DeliveryJob,
-  ExtractedRecord
+  UsageRecord,
+  Upload
 } from '../models/index.js';
 import { requireRole } from '../middleware/auth.js';
 import {
@@ -52,14 +53,47 @@ router.get('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const campaign = await Campaign.findById(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-  if (!['draft', 'awaiting_approval', 'rejected', 'cancelled', 'failed', 'completed', 'partial_failure'].includes(campaign.status)) {
-    return res.status(409).json({ error: 'Only inactive campaigns can be deleted' });
+  if (!['draft', 'awaiting_approval', 'rejected'].includes(campaign.status)) {
+    return res.status(409).json({
+      error: 'Campaign history cannot be deleted after dispatch. Archive or retain it for audit.'
+    });
   }
-  await Promise.all([
-    DeliveryJob.deleteMany({ campaign: campaign._id }),
-    DispatchOutbox.deleteMany({ campaign: campaign._id }),
-    Campaign.deleteOne({ _id: campaign._id })
-  ]);
+
+  const deliveryCount = await DeliveryJob.countDocuments({
+    campaign: campaign._id
+  });
+
+  if (deliveryCount > 0) {
+    return res.status(409).json({
+      error: 'Campaign has delivery history and cannot be deleted'
+    });
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await DispatchOutbox.deleteMany(
+        { campaign: campaign._id },
+        { session }
+      );
+      await UsageRecord.deleteMany(
+        { campaign: campaign._id },
+        { session }
+      );
+      await Campaign.deleteOne(
+        { _id: campaign._id },
+        { session }
+      );
+      await Upload.updateOne(
+        { _id: campaign.upload, status: 'submitted' },
+        { $set: { status: 'review' } },
+        { session }
+      );
+    });
+  } finally {
+    await session.endSession();
+  }
+
   await audit(req, 'campaign.deleted', 'campaign', campaign._id, 'success', { reference: campaign.reference });
   return res.json({ ok: true });
 });

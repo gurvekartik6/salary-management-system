@@ -14,12 +14,13 @@ import {
   SystemSetting,
 } from '../models/index.js';
 
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireRole } from '../middleware/auth.js';
 import { getProcessingQueue } from '../services/queue.js';
 import { createCampaignFromUpload } from '../services/campaigns.js';
 import { audit } from '../utils/audit.js';
 
 const router = Router();
+router.use(requireRole('admin'));
 
 router.param('id', (req, res, next, value) =>
   mongoose.Types.ObjectId.isValid(value)
@@ -165,7 +166,6 @@ async function validateFile(file) {
 
 router.post(
   '/',
-  requireAuth,
   uploadLimiter,
   uploadMiddleware.single('file'),
   async (req, res, next) => {
@@ -280,11 +280,8 @@ router.post(
   },
 );
 
-router.get('/', requireAuth, async (req, res) => {
-  const filter =
-    req.user.role === 'admin' ? {} : { uploadedBy: req.user.id };
-
-  const items = await Upload.find(filter)
+router.get('/', async (req, res) => {
+  const items = await Upload.find({})
     .select('-storagePath')
     .sort({ createdAt: -1 })
     .limit(100)
@@ -307,13 +304,10 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
   return res.json({ ok: true });
 });
 
-router.get('/:id', requireAuth, async (req, res) => {
-  const filter = {
-    _id: req.params.id,
-    ...(req.user.role === 'admin' ? {} : { uploadedBy: req.user.id }),
-  };
-
-  const item = await Upload.findOne(filter).select('-storagePath').lean();
+router.get('/:id', async (req, res) => {
+  const item = await Upload.findOne({
+    _id: req.params.id
+  }).select('-storagePath').lean();
 
   if (!item) {
     return res.status(404).json({ error: 'Upload not found' });
@@ -322,13 +316,10 @@ router.get('/:id', requireAuth, async (req, res) => {
   return res.json({ upload: item });
 });
 
-router.get('/:id/preview', requireAuth, async (req, res) => {
-  const filter = {
-    _id: req.params.id,
-    ...(req.user.role === 'admin' ? {} : { uploadedBy: req.user.id }),
-  };
-
-  const upload = await Upload.findOne(filter).select('-storagePath').lean();
+router.get('/:id/preview', async (req, res) => {
+  const upload = await Upload.findOne({
+    _id: req.params.id
+  }).select('-storagePath').lean();
 
   if (!upload) {
     return res.status(404).json({ error: 'Upload not found' });
@@ -352,10 +343,9 @@ router.get('/:id/preview', requireAuth, async (req, res) => {
   });
 });
 
-router.patch('/:id/records/:recordId', requireAuth, async (req, res) => {
+router.patch('/:id/records/:recordId', async (req, res) => {
   const upload = await Upload.findOne({
     _id: req.params.id,
-    ...(req.user.role === 'admin' ? {} : { uploadedBy: req.user.id }),
     status: 'review',
   });
 
@@ -525,6 +515,22 @@ router.post('/:id/reprocess', requireRole('admin'), async (req, res) => {
 
   if (!upload) {
     return res.status(404).json({ error: 'Upload not found' });
+  }
+
+  const linkedCampaign = await Campaign.findOne({
+    upload: upload._id
+  }).select('reference status').lean();
+
+  if (linkedCampaign) {
+    return res.status(409).json({
+      error: `This document is linked to campaign ${linkedCampaign.reference} and cannot be reprocessed`
+    });
+  }
+
+  if (['processing', 'submitted'].includes(upload.status)) {
+    return res.status(409).json({
+      error: `This document cannot be reprocessed while it is ${upload.status}`
+    });
   }
 
   upload.status = 'uploaded';

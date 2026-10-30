@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import {
   Campaign,
   DispatchOutbox,
@@ -41,6 +42,15 @@ export async function createCampaignFromUpload(req, uploadId, title, channels) {
     throw httpError('Select one or more valid notification channels');
   }
 
+  const idempotencyKey = String(req.get?.('idempotency-key') || '').trim().slice(0, 200);
+  if (idempotencyKey) {
+    const existing = await Campaign.findOne({
+      owner: req.user.id,
+      idempotencyKey
+    });
+    if (existing) return existing;
+  }
+
   const upload = await Upload.findOne({
     _id: uploadId,
     uploadedBy: req.user.id,
@@ -51,13 +61,26 @@ export async function createCampaignFromUpload(req, uploadId, title, channels) {
     throw httpError('Upload not found or not ready for submission', 404);
   }
 
-  const idempotencyKey = String(req.get?.('idempotency-key') || '').trim().slice(0, 200);
-  if (idempotencyKey) {
-    const existing = await Campaign.findOne({
-      owner: req.user.id,
-      idempotencyKey
-    });
-    if (existing) return existing;
+  const linkedCampaign = await Campaign.findOne({
+    upload: upload._id,
+    status: {
+      $in: [
+        'draft',
+        'awaiting_approval',
+        'approved',
+        'scheduled',
+        'sending',
+        'paused',
+        'cancelling'
+      ]
+    }
+  }).select('_id reference status').lean();
+
+  if (linkedCampaign) {
+    throw httpError(
+      `This upload is already linked to active campaign ${linkedCampaign.reference}`,
+      409
+    );
   }
 
   const allRecords = await ExtractedRecord.find({
@@ -162,29 +185,56 @@ export async function createCampaignFromUpload(req, uploadId, title, channels) {
     );
   }
 
-  const campaign = await Campaign.create({
-    reference: makeRef('SGGS-CAM'),
-    idempotencyKey: idempotencyKey || undefined,
-    title: String(title || upload.originalName).slice(0, 160),
-    owner: req.user.id,
-    ownerRole: req.user.role,
-    upload: upload._id,
-    channels,
-    recipients,
-    status: 'awaiting_approval',
-    counters: {
-      total: recipients.length * channels.length,
-      queued: 0,
-      sent: 0,
-      delivered: 0,
-      failed: 0,
-      bounced: 0,
-      unknown: 0
-    }
-  });
+  const session = await mongoose.startSession();
+  let campaign;
 
-  upload.status = 'submitted';
-  await upload.save();
+  try {
+    await session.withTransaction(async () => {
+      const claimedUpload = await Upload.findOneAndUpdate(
+        {
+          _id: upload._id,
+          status: 'review'
+        },
+        { $set: { status: 'submitted' } },
+        { new: true, session }
+      );
+
+      if (!claimedUpload) {
+        throw httpError(
+          'This upload was submitted by another request. Reload the campaign list.',
+          409
+        );
+      }
+
+      const created = await Campaign.create(
+        [{
+          reference: makeRef('SGGS-CAM'),
+          idempotencyKey: idempotencyKey || undefined,
+          title: String(title || upload.originalName).slice(0, 160),
+          owner: req.user.id,
+          ownerRole: req.user.role,
+          upload: upload._id,
+          channels,
+          recipients,
+          status: 'awaiting_approval',
+          counters: {
+            total: recipients.length * channels.length,
+            queued: 0,
+            sent: 0,
+            delivered: 0,
+            failed: 0,
+            bounced: 0,
+            unknown: 0
+          }
+        }],
+        { session }
+      );
+
+      [campaign] = created;
+    });
+  } finally {
+    await session.endSession();
+  }
 
   await audit(
     req,

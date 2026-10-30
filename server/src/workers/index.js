@@ -23,6 +23,7 @@ import {
   sendWhatsApp
 } from '../services/notifications.js';
 import { audit } from '../utils/audit.js';
+import { recalculateCampaign } from '../services/deliveryState.js';
 
 function redisConnection() {
   const url = new URL(
@@ -64,73 +65,6 @@ function campaignSnapshotHash(campaign) {
   return createHash('sha256')
     .update(JSON.stringify(snapshot))
     .digest('hex');
-}
-
-export async function recalculateCampaign(campaignId) {
-  const jobs = await DeliveryJob.aggregate([
-    { $match: { campaign: campaignId } },
-    {
-      $group: {
-        _id: '$status',
-        count: { $sum: 1 }
-      }
-    }
-  ]);
-
-  const counts = Object.fromEntries(
-    jobs.map(item => [item._id, item.count])
-  );
-
-  const total = Object.values(counts).reduce(
-    (sum, count) => sum + count,
-    0
-  );
-
-  const campaign = await Campaign.findById(campaignId);
-  if (!campaign) return;
-
-  campaign.counters = {
-    total,
-    queued: (counts.queued || 0) + (counts.sending || 0),
-    sent: counts.sent || 0,
-    delivered: counts.delivered || 0,
-    failed: counts.failed || 0,
-    bounced: counts.bounced || 0,
-    unknown: counts.unknown || 0
-  };
-
-  const finalStatuses = [
-    'cancelled',
-    'cancelling',
-    'rejected',
-    'paused',
-    'failed',
-    'completed',
-    'partial_failure'
-  ];
-
-  if (finalStatuses.includes(campaign.status)) {
-    await campaign.save();
-    return;
-  }
-
-  const noActiveDeliveries =
-    !counts.queued && !counts.sending;
-
-  if (
-    noActiveDeliveries &&
-    total > 0 &&
-    campaign.dispatchPreparedAt
-  ) {
-    campaign.status =
-      counts.failed || counts.bounced || counts.unknown
-        ? 'partial_failure'
-        : 'completed';
-
-    campaign.completedAt = new Date();
-  }
-
-  await campaign.save();
 }
 
 async function dispatchCampaign(job, queue) {

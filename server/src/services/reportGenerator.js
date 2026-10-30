@@ -231,7 +231,6 @@ export async function generateReport(reportId) {
       const rows = jobs.map(job => ({
         campaign: campaignMap.get(String(job.campaign))?.reference || '',
         title: campaignMap.get(String(job.campaign))?.title || '',
-        staffId: job.staffId || '',
         contact: job.destination
           ? `${job.destination.slice(0, 2)}••••${job.destination.slice(-3)}`
           : '',
@@ -260,7 +259,6 @@ export async function generateReport(reportId) {
           rows[0] || {
             campaign: '',
             title: '',
-            staffId: '',
             contact: '',
             channel: '',
             status: '',

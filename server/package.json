@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/services/queue.js && node --check src/workers/index.js",
+    "check": "node -e \"const fs=require('fs'); const path=require('path'); function walk(dir){ for(const entry of fs.readdirSync(dir,{withFileTypes:true})){ const full=path.join(dir,entry.name); if(entry.isDirectory()) walk(full); else if(entry.isFile() && full.endsWith('.js')){ const result=require('child_process').spawnSync(process.execPath,['--check',full],{stdio:'inherit'}); if(result.status!==0) process.exit(result.status || 1); } } } walk('src');\"",
     "test": "node --test",
     "seed:admin": "node src/scripts/seedAdmin.js"
   },

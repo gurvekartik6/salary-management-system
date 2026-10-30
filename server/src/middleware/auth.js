@@ -62,7 +62,3 @@ export function requireRole(...roles) {
     }
   };
 }
-
-export function requireOwnerOrAdmin() {
-  return requireRole('admin');
-}

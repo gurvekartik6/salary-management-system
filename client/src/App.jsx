@@ -248,7 +248,6 @@ const navAdmin = [
 ];
 function Shell({ user, onLogout, children }) {
   const location = useLocation();
-  const admin = user.role === "admin";
   const nav = navAdmin;
   const [mobileOpen, setMobileOpen] = useState(false);
   const [site, setSite] = useState({});
@@ -447,7 +446,8 @@ function Stat({ label, value, note, icon: Icon }) {
   );
 }
 
-function UploadsPage({ admin = false }) {
+function UploadsPage() {
+  const admin = true;
   const navigate = useNavigate();
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -701,6 +701,12 @@ function UploadsPage({ admin = false }) {
               ))}
             </div>
           )}
+          {selected.status === "submitted" && (
+            <Alert
+              error="This document is linked to a campaign and is locked. Use the campaign version workflow instead of reprocessing the source file."
+              onClose={() => {}}
+            />
+          )}
         </section>
       </div>
       {selected && (
@@ -758,7 +764,6 @@ function UploadsPage({ admin = false }) {
                     key={r._id}
                     record={r}
                     onSave={saveRecord}
-                    admin={admin}
                     showSalary={hasSalary}
                   />
                 ))}
@@ -803,7 +808,7 @@ function UploadsPage({ admin = false }) {
     </>
   );
 }
-function EditableRecord({ record, onSave, admin = false, showSalary = false }) {
+function EditableRecord({ record, onSave, showSalary = false }) {
   const [r, setR] = useState(record);
   const [saving, setSaving] = useState(false);
 
@@ -918,14 +923,15 @@ function EditableRecord({ record, onSave, admin = false, showSalary = false }) {
   );
 }
 
-function CampaignsPage({ admin = false }) {
+function CampaignsPage() {
+  const admin = true;
   const [items, setItems] = useState([]);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busyId, setBusyId] = useState("");
   async function load() {
     try {
-      const d = await api(admin ? "/admin/campaigns" : "/campaigns");
+      const d = await api("/admin/campaigns");
       setItems(d.items || []);
     } catch (e) {
       setError(e.message);
@@ -933,14 +939,14 @@ function CampaignsPage({ admin = false }) {
   }
   useEffect(() => {
     load();
-  }, [admin]);
+  }, []);
   async function action(id, action, body = {}) {
     setBusyId(id + action);
     setError("");
     setSuccess("");
     try {
       await api(
-        `${admin ? "/admin/campaigns" : "/campaigns"}/${id}/${action}`,
+        `/admin/campaigns/${id}/${action}`,
         { method: "POST", body },
       );
       setSuccess(
@@ -959,7 +965,7 @@ function CampaignsPage({ admin = false }) {
     if (!window.confirm(`Delete campaign "${campaign.title}"? Only inactive campaigns can be deleted.`)) return;
     setBusyId(`${campaign._id}delete`);
     try {
-      await api(`${admin ? "/admin/campaigns" : "/campaigns"}/${campaign._id}`, {
+      await api(`/admin/campaigns/${campaign._id}`, {
         method: "DELETE",
       });
       setSuccess("Campaign deleted.");
@@ -990,7 +996,7 @@ function CampaignsPage({ admin = false }) {
       <section className="panel">
         <div className="panel-title">
           <div>
-            <h2>{admin ? "Campaign queue" : "Campaign history"}</h2>
+            <h2>Campaign queue</h2>
             <p className="muted">{items.length} campaigns</p>
           </div>
           <button className="icon-button" onClick={load} aria-label="Refresh">
@@ -2115,203 +2121,6 @@ function AdminOverview() {
       </div>
     </>
   );
-}
-
-const employeePayrollFields = [
-  "Sl.", "Abbr", "Basic + Grade pay", "DA", "HRA", "TA", "Wash All.",
-  "Special Pay", "GROSS PAY", "GPF", "CPF", "PT", "IT", "LIC", "Society",
-  "Other", "Bus", "GLSI", "Bank Loan", "Group Insurance", "CM Fund",
-  "IT 2025-26", "Saff Adv", "Fest Adv",
-  "House Maintanace Recovery & Electricity Charges",
-  "SGGS Employee Health Checkup Fees", "Alumni-24 Reg. Fees",
-  "Sashastra Sena Dwajdin Nidhi 2024-25", "Revenue Stamp Fees",
-  "Total Deduct", "NET PAY",
-];
-
-function emptyPayrollDetails() {
-  return Object.fromEntries(employeePayrollFields.map((field) => [field, ""]));
-}
-
-function EmployeesPage() {
-  const [items, setItems] = useState([]);
-  const [q, setQ] = useState("");
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [panNumber, setPanNumber] = useState("");
-  const [payrollDetails, setPayrollDetails] = useState(emptyPayrollDetails);
-  const [language, setLanguage] = useState("en");
-  const [csv, setCsv] = useState("");
-  const [importFile, setImportFile] = useState(null);
-  const [lastImportId, setLastImportId] = useState("");
-  const [importMode, setImportMode] = useState("file");
-  const [editing, setEditing] = useState(null);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-  const [busy, setBusy] = useState(false);
-  async function load() {
-    const d = await api(`/admin/employees?q=${encodeURIComponent(q)}&status=all&limit=200`);
-    setItems(d.items || []);
-  }
-  useEffect(() => { load().catch((e) => setError(e.message)); }, []);
-  function clearForm() {
-    setName(""); setEmail(""); setPhone(""); setPanNumber(""); setPayrollDetails(emptyPayrollDetails()); setLanguage("en"); setEditing(null);
-  }
-  async function save(e) {
-    e.preventDefault(); setError(""); setSuccess(""); setBusy(true);
-    try {
-      const body = { name, email, phone, panNumber, language, payrollDetails };
-      if (editing) {
-        await api(`/admin/employees/${editing._id}`, { method: "PATCH", body });
-        setSuccess("Employee updated successfully.");
-      } else {
-        await api("/admin/employees", { method: "POST", body });
-        setSuccess("Employee added successfully.");
-      }
-      clearForm(); await load();
-    } catch (e) { setError(e.message); }
-    finally { setBusy(false); }
-  }
-  async function importFileEmployees(e) {
-    e.preventDefault();
-    if (!importFile) return;
-    setBusy(true); setError(""); setSuccess("");
-    try {
-      const form = new FormData();
-      form.append("file", importFile);
-      const d = await api("/admin/employees/import-file", { method: "POST", body: form });
-      const detail = d.errors?.length ? ` First issue: ${d.errors[0].name || "row"} — ${d.errors[0].reason}.` : "";
-      setSuccess(`File import complete: ${d.created} added, ${d.updated} updated, ${d.rejected} rejected.${detail}`);
-      setLastImportId(d.importId || "");
-      setImportFile(null); e.target.reset(); await load();
-    } catch (e) { setError(e.message); }
-    finally { setBusy(false); }
-  }
-  async function previewFileEmployees() {
-    if (!importFile) return;
-    setBusy(true); setError(""); setSuccess("");
-    try {
-      const form = new FormData();
-      form.append("file", importFile);
-      const d = await api("/admin/employees/import-file?preview=true", { method: "POST", body: form });
-      setSuccess(`Preview: ${d.created} additions, ${d.updated} updates, ${d.rejected} rejected. Submit Import employee file to apply.`);
-    } catch (e) { setError(e.message); }
-    finally { setBusy(false); }
-  }
-  async function importCsv(e) {
-    e.preventDefault(); setBusy(true); setError(""); setSuccess("");
-    try {
-      const d = await api("/admin/employees/import-csv", { method: "POST", body: { csv } });
-      const detail = d.errors?.length ? ` First issue: ${d.errors[0].name || "row"} — ${d.errors[0].reason}.` : "";
-      setSuccess(`Import complete: ${d.created} added, ${d.updated} updated, ${d.rejected} rejected.${detail}`);
-      setLastImportId(d.importId || "");
-      setCsv(""); await load();
-    } catch (e) { setError(e.message); }
-    finally { setBusy(false); }
-  }
-  async function previewCsv() {
-    if (!csv.trim()) return;
-    setBusy(true); setError(""); setSuccess("");
-    try {
-      const d = await api("/admin/employees/import-csv?preview=true", { method: "POST", body: { csv } });
-      setSuccess(`Preview: ${d.created} additions, ${d.updated} updates, ${d.rejected} rejected. Submit Import CSV to apply.`);
-    } catch (e) { setError(e.message); }
-    finally { setBusy(false); }
-  }
-  async function rollbackLastImport() {
-    if (!lastImportId || !window.confirm("Roll back the most recent employee import? Existing campaign-linked employees will be preserved.")) return;
-    try {
-      await api(`/admin/employees/imports/${lastImportId}/rollback`, { method: "POST", body: {} });
-      setSuccess("Employee import rolled back."); setLastImportId(""); await load();
-    } catch (e) { setError(e.message); }
-  }
-  async function toggleActive(employee) {
-    const next = !employee.active;
-    if (!window.confirm(`${next ? "Reactivate" : "Deactivate"} ${employee.name}? Historical salary and bill records will be preserved.`)) return;
-    try {
-      await api(`/admin/employees/${employee._id}`, { method: "PATCH", body: { active: next } });
-      setSuccess(`Employee ${next ? "reactivated" : "deactivated"}.`); await load();
-    } catch (e) { setError(e.message); }
-  }
-  async function deleteEmployee(employee) {
-    if (!window.confirm(`Delete ${employee.name}? The record will be deactivated and historical campaign data will be preserved.`)) return;
-    try {
-      await api(`/admin/employees/${employee._id}`, { method: "DELETE" });
-      setSuccess("Employee deleted.");
-      await load();
-    } catch (e) { setError(e.message); }
-  }
-  function beginEdit(employee) {
-    setEditing(employee); setName(employee.name || ""); setEmail(employee.email || "");
-    setPhone(employee.phone || ""); setPanNumber(employee.panNumber || "");
-    setPayrollDetails({ ...emptyPayrollDetails(), ...(employee.payrollDetails || {}) });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-  async function exportEmployees(format) {
-    setError("");
-    try {
-      const response = await fetch(`/api/admin/employees/export/${format}?q=${encodeURIComponent(q)}&status=all`, { credentials: "include" });
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || `Export failed (${response.status})`);
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `sggs-employees.${format}`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (e) { setError(e.message); }
-  }
-  return <>
-    <PageHeading eyebrow="EMPLOYEE DIRECTORY" title="Employees" description="Add, update, delete and import employees. Email is the unique employee identifier; payroll fields from imported salary files are retained." />
-    <Alert error={error} success={success} onClose={() => { setError(""); setSuccess(""); }} />
-    <section className="panel">
-      <div className="panel-title"><div><h2>{editing ? "Update employee" : "Add employee"}</h2><p className="muted">Name, unique email address and preferred language. Phone number is optional.</p></div><Users size={20} className="muted-icon" /></div>
-      <form className="form-grid" onSubmit={save}>
-        <Field label="Employee name" value={name} onChange={(e) => setName(e.target.value)} required />
-        <Field label="Email address" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <Field label="Phone number (optional)" value={phone} onChange={(e) => setPhone(e.target.value)} />
-        <Field label="PAN number (optional)" value={panNumber} onChange={(e) => setPanNumber(e.target.value)} />
-        <div className="field field-span">
-          <span>Salary and deduction information</span>
-          <div className="form-grid">
-            {employeePayrollFields.map((field) => (
-              <Field
-                key={field}
-                label={field}
-                value={payrollDetails[field] ?? ""}
-                onChange={(e) => setPayrollDetails({ ...payrollDetails, [field]: e.target.value })}
-              />
-            ))}
-          </div>
-        </div>
-        <label className="field"><span>Preferred language</span><select value={language} onChange={(e) => setLanguage(e.target.value)}><option value="en">English</option><option value="mr">Marathi</option><option value="hi">Hindi</option></select></label>
-        <div className="form-action"><Button type="submit" loading={busy}>{editing ? "Save changes" : "Add employee"}</Button>{editing && <Button type="button" variant="secondary" onClick={clearForm}>Cancel edit</Button>}</div>
-      </form>
-    </section>
-    <section className="panel">
-      <div className="panel-title"><div><h2>Import employees</h2><p className="muted">Import one employee file or paste CSV content. CSV, XLSX, and XLS salary files are supported, including files without email addresses.</p></div></div>
-      <label className="field"><span>Import method</span><select value={importMode} onChange={(e) => setImportMode(e.target.value)}><option value="file">Upload CSV / Excel file</option><option value="paste">Paste CSV content</option></select></label>
-      {importMode === "file" ? (
-        <form className="stack" onSubmit={importFileEmployees}>
-          <label className="field"><span>Employee CSV / Excel file</span><input type="file" accept=".csv,.xlsx,.xls" onChange={(e) => setImportFile(e.target.files?.[0] || null)} /></label>
-          <div className="table-actions"><Button type="button" variant="secondary" disabled={!importFile || busy} onClick={previewFileEmployees}>Preview changes</Button><Button type="submit" disabled={!importFile} loading={busy}>Import employee file</Button></div>
-        </form>
-      ) : (
-        <form className="stack" onSubmit={importCsv}>
-          <label className="field"><span>Paste CSV content</span><textarea rows="6" value={csv} onChange={(e) => setCsv(e.target.value)} placeholder={"name,email,phone,language\nEmployee Name,employee@sggs.ac.in,,en"} /></label>
-          <div className="table-actions"><Button type="button" variant="secondary" disabled={!csv.trim() || busy} onClick={previewCsv}>Preview changes</Button><Button type="submit" disabled={!csv.trim()} loading={busy}>Import CSV</Button></div>
-        </form>
-      )}
-      {lastImportId ? <Button type="button" variant="secondary" onClick={rollbackLastImport}>Roll back last import</Button> : null}
-    </section>
-    <section className="panel">
-      <div className="panel-title"><div><h2>Employee directory</h2><p className="muted">{items.length} records shown</p></div><div className="stack"><form className="search-form" onSubmit={(e) => { e.preventDefault(); load().catch((err) => setError(err.message)); }}><Search size={16} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, email or phone" /><button type="submit">Search</button></form><div className="table-actions"><Button variant="secondary" className="button-small" onClick={() => exportEmployees("csv")}>Generate CSV</Button><Button variant="secondary" className="button-small" onClick={() => exportEmployees("xlsx")}>Generate Excel</Button><Button variant="secondary" className="button-small" onClick={() => exportEmployees("pdf")}>Generate PDF</Button></div></div></div>
-      {items.length === 0 ? <Empty title="No employees found" text="Import the supplied faculty list or add employees above." /> : <div className="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>PAN</th><th>Language</th><th>Status</th><th>Operations</th></tr></thead><tbody>{items.map((i) => <tr key={i._id}><td><strong>{i.name}</strong></td><td>{i.email}</td><td>{i.phone || "—"}</td><td>{i.panNumber || "—"}</td><td>{{ en: "English", mr: "Marathi", hi: "Hindi" }[i.language] || "English"}</td><td><Status value={i.active ? "active" : "inactive"} /></td><td><div className="table-actions"><Button variant="secondary" className="button-small" onClick={() => beginEdit(i)}>Edit</Button><Button variant="secondary" className="button-small" onClick={() => toggleActive(i)}>{i.active ? "Deactivate" : "Reactivate"}</Button><Button variant="secondary" className="button-small" onClick={() => deleteEmployee(i)}>Delete</Button></div></td></tr>)}</tbody></table></div>}
-    </section>
-  </>;
 }
 
 function MiscellaneousPage() {

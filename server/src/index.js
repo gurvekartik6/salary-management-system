@@ -1,11 +1,7 @@
 
-import dns from 'node:dns';
 import dotenv from 'dotenv';
 import path from 'node:path';
 import fs from 'node:fs';
-
-dns.setServers(['8.8.8.8', '8.8.4.4']);
-console.info('DNS servers configured: Google DNS');
 
 const envCandidates = [
   path.resolve(process.cwd(), '.env'),
@@ -90,7 +86,8 @@ function validateProductionEnvironment() {
 
   const required = [
     'MONGODB_URI',
-    'SESSION_SECRET'
+    'SESSION_SECRET',
+    'REDIS_URL'
   ];
 
   const missing = required.filter(
@@ -108,6 +105,12 @@ function validateProductionEnvironment() {
       'SESSION_SECRET must contain at least 32 characters in production.'
     );
   }
+
+  if (!redisEnabled) {
+    throw new Error(
+      'REDIS_ENABLED cannot be false in production because queue-dependent workflows are required.'
+    );
+  }
 }
 
 async function start() {
@@ -123,14 +126,6 @@ async function start() {
 
   const appModule = await import('./app.js');
   app = appModule.default;
-
-  const port = Number(process.env.PORT || 4000);
-
-  server = app.listen(port, () => {
-    console.info(
-      `SGGS Salary Notification API listening on port ${port}`
-    );
-  });
 
   await bootstrapSettings();
 
@@ -179,6 +174,14 @@ async function start() {
       );
     });
   }, 24 * 60 * 60 * 1000);
+
+  const port = Number(process.env.PORT || 4000);
+
+  server = app.listen(port, () => {
+    console.info(
+      `SGGS Salary Notification API listening on port ${port}`
+    );
+  });
 
   console.info('Application startup completed.');
 }
