@@ -1,32 +1,19 @@
 import mongoose from 'mongoose';
 const { Schema, model } = mongoose;
 
-const opts = { timestamps: true, strict: 'throw' };
+const opts = {
+  timestamps: true,
+  strict: 'throw',
+  suppressReservedKeysWarning: true
+};
 
 export const Admin = model('Admin', new Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true, select: false },
+  role: { type: String, enum: ['admin'], default: 'admin', index: true },
   active: { type: Boolean, default: true },
   lastLoginAt: Date,
-  mfaRequired: { type: Boolean, default: true },
-  mfaEnabled: { type: Boolean, default: false },
-  mfaSecretEncrypted: { type: String, select: false },
-  mfaPendingSecretEncrypted: { type: String, select: false }
 }, opts));
-
-export const Employee = model('Employee', new Schema({
-  staffId: { type: String, required: true, unique: true, trim: true, index: true },
-  payrollId: { type: String, trim: true, uppercase: true, sparse: true },
-  name: { type: String, required: true, trim: true },
-  email: { type: String, lowercase: true, trim: true },
-  phone: { type: String, trim: true },
-  language: { type: String, enum: ['en', 'mr', 'hi'], default: 'en' },
-  active: { type: Boolean, default: true },
-  source: { type: String, enum: ['manual', 'import'], default: 'manual' },
-  updatedBy: { type: Schema.Types.ObjectId, ref: 'Admin' }
-}, opts));
-
-Employee.schema.index({ payrollId: 1 }, { unique: true, sparse: true });
 
 export const Sequence = model('Sequence', new Schema({
   key: { type: String, required: true, unique: true },
@@ -34,7 +21,6 @@ export const Sequence = model('Sequence', new Schema({
 }, { versionKey: false }));
 
 export const MiscellaneousContact = model('MiscellaneousContact', new Schema({
-  staffId: { type: String, required: true, unique: true, trim: true, index: true },
   name: { type: String, required: true, trim: true },
   organization: { type: String, trim: true, default: '' },
   email: { type: String, trim: true, lowercase: true, default: '' },
@@ -76,8 +62,6 @@ export const ExtractedRecord = model('ExtractedRecord', new Schema({
   sourceRow: Number,
   sourcePage: Number,
   raw: { type: Schema.Types.Mixed, default: {} },
-  staffId: String,
-  employee: { type: Schema.Types.ObjectId, ref: 'Employee' },
   name: String,
   email: String,
   phone: String,
@@ -87,25 +71,22 @@ export const ExtractedRecord = model('ExtractedRecord', new Schema({
   valid: { type: Boolean, default: false, index: true },
   duplicate: { type: Boolean, default: false },
   excluded: { type: Boolean, default: false },
-  matchStatus: {
-    type: String,
-    enum: ['matched', 'unmatched', 'ambiguous', 'exception'],
-    default: 'unmatched'
-  },
   errors: [String],
   reviewedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
-  reviewedAt: Date
+  reviewedAt: Date,
+  exceptionApprovedBy: { type: Schema.Types.ObjectId, ref: 'Admin' },
+  exceptionApprovedAt: Date,
+  exceptionReason: { type: String, maxlength: 500 }
 }, opts));
 
 const recipientSchema = new Schema({
-  employee: { type: Schema.Types.ObjectId, ref: 'Employee' },
-  staffId: String,
   name: String,
   email: String,
   phone: String,
   language: { type: String, enum: ['en', 'mr', 'hi'], default: 'en' },
   salaryAmount: Schema.Types.Decimal128,
   salaryPeriod: String,
+  salaryDetails: { type: Schema.Types.Mixed, default: {} },
   sourceRecord: { type: Schema.Types.ObjectId, ref: 'ExtractedRecord' },
   sourceRow: Number,
   sourceSheet: String,
@@ -114,6 +95,7 @@ const recipientSchema = new Schema({
 
 export const Campaign = model('Campaign', new Schema({
   reference: { type: String, required: true, unique: true, index: true },
+  idempotencyKey: { type: String, index: true, sparse: true },
   title: { type: String, required: true, maxlength: 160 },
   owner: { type: Schema.Types.ObjectId, required: true, index: true },
   ownerRole: { type: String, required: true },
@@ -167,13 +149,16 @@ export const Campaign = model('Campaign', new Schema({
   createdByVersion: Number,
   notes: String
 }, opts));
+Campaign.schema.index(
+  { owner: 1, idempotencyKey: 1 },
+  { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } }
+);
 
 export const DeliveryJob = model('DeliveryJob', new Schema({
   idempotencyKey: { type: String, required: true, unique: true },
   campaign: { type: Schema.Types.ObjectId, ref: 'Campaign', required: true, index: true },
   campaignVersion: { type: Number, required: true },
   recipientIndex: Number,
-  staffId: String,
   channel: { type: String, enum: ['email', 'sms', 'whatsapp'], required: true },
   destination: String,
   status: {
@@ -191,6 +176,16 @@ export const DeliveryJob = model('DeliveryJob', new Schema({
   deliveredAt: Date,
   cost: { type: Number, default: 0 },
   currency: { type: String, default: 'INR' }
+}, opts));
+
+export const DispatchOutbox = model('DispatchOutbox', new Schema({
+  campaign: { type: Schema.Types.ObjectId, ref: 'Campaign', required: true, unique: true },
+  version: { type: Number, required: true },
+  status: { type: String, enum: ['pending', 'enqueued', 'failed'], default: 'pending', index: true },
+  attempts: { type: Number, default: 0 },
+  nextAttemptAt: { type: Date, default: Date.now, index: true },
+  lastError: String,
+  enqueuedAt: Date
 }, opts));
 
 export const DeliveryAttempt = model('DeliveryAttempt', new Schema({

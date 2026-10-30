@@ -13,3 +13,8 @@ private-backups/
 *.sggsbackup
 *.meta
 *.sha256
+csv/
+csv
+server/server
+server/server/private-uploads
+server/server/private-reports

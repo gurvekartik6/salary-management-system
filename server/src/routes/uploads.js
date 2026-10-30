@@ -10,7 +10,7 @@ import { fileTypeFromFile } from 'file-type';
 import {
   Upload,
   ExtractedRecord,
-  Employee,
+  Campaign,
   SystemSetting,
 } from '../models/index.js';
 
@@ -92,10 +92,6 @@ function ref() {
 function cleanString(value) {
   if (value === null || value === undefined) return '';
   return String(value).trim();
-}
-
-function normalizeStaffId(value) {
-  return cleanString(value).toUpperCase();
 }
 
 function normalizeLanguage(value, fallback = 'en') {
@@ -211,21 +207,6 @@ router.post(
         .update(bytes)
         .digest('hex');
 
-      const duplicate = await Upload.findOne({
-        sha256,
-        uploadedBy: req.user.id,
-        status: { $ne: 'expired' },
-      });
-
-      if (duplicate) {
-        await fs.unlink(file.path).catch(() => {});
-
-        return res.status(409).json({
-          error: 'This file has already been uploaded by your account',
-          existingReference: duplicate.reference,
-        });
-      }
-
       const retentionPolicy =
         (await SystemSetting.findOne({ key: 'retentionPolicy' }).lean())
           ?.value || {};
@@ -312,6 +293,20 @@ router.get('/', requireAuth, async (req, res) => {
   return res.json({ items });
 });
 
+router.delete('/:id', requireRole('admin'), async (req, res) => {
+  const upload = await Upload.findById(req.params.id).select('+storagePath');
+  if (!upload) return res.status(404).json({ error: 'Upload not found' });
+  const linkedCampaign = await Campaign.findOne({ upload: upload._id }).select('_id').lean();
+  if (linkedCampaign) {
+    return res.status(409).json({ error: 'This document is linked to a campaign and cannot be deleted' });
+  }
+  if (upload.storagePath) await fs.unlink(upload.storagePath).catch(() => {});
+  await ExtractedRecord.deleteMany({ upload: upload._id });
+  await Upload.deleteOne({ _id: upload._id });
+  await audit(req, 'upload.deleted', 'upload', upload._id, 'success', { reference: upload.reference });
+  return res.json({ ok: true });
+});
+
 router.get('/:id', requireAuth, async (req, res) => {
   const filter = {
     _id: req.params.id,
@@ -345,7 +340,16 @@ router.get('/:id/preview', requireAuth, async (req, res) => {
     .limit(2000)
     .lean();
 
-  return res.json({ upload, records });
+  return res.json({
+    upload,
+    records: records.map(record => ({
+      ...record,
+      salaryAmount:
+        record.salaryAmount?.toString?.() ??
+        record.salaryAmount ??
+        '',
+    })),
+  });
 });
 
 router.patch('/:id/records/:recordId', requireAuth, async (req, res) => {
@@ -371,7 +375,6 @@ router.patch('/:id/records/:recordId', requireAuth, async (req, res) => {
   const body = req.body || {};
 
   const allowed = [
-    'staffId',
     'name',
     'email',
     'phone',
@@ -428,80 +431,24 @@ router.patch('/:id/records/:recordId', requireAuth, async (req, res) => {
     if (!Object.hasOwn(body, key)) continue;
     if (['salaryAmount', 'email', 'phone', 'language'].includes(key)) continue;
 
-    record[key] =
-      key === 'staffId'
-        ? normalizeStaffId(body[key])
-        : cleanString(body[key]);
+    record[key] = cleanString(body[key]);
   }
 
-  // Resolve the staff ID against the authoritative employee directory.
-  // Never replace a useful extracted contact with an empty directory value.
-  const staffId = normalizeStaffId(record.staffId);
-  record.staffId = staffId;
-
-  let employee = null;
-
-  if (staffId) {
-    employee = await Employee.findOne({
-      staffId,
-      active: true,
-    }).lean();
-  }
-
-  record.employee = employee?._id;
-  record.matchStatus = employee
-    ? 'matched'
-    : staffId
-      ? 'unmatched'
-      : 'exception';
-
-  if (employee) {
-    if (!cleanString(record.name)) record.name = employee.name || '';
-
-    if (!cleanString(record.email) && cleanString(employee.email)) {
-      record.email = cleanString(employee.email);
-    }
-
-    if (!cleanString(record.phone) && cleanString(employee.phone)) {
-      record.phone = cleanString(employee.phone);
-    }
-
-    if (!cleanString(record.language)) {
-      record.language = normalizeLanguage(employee.language) || 'en';
-    }
-  }
-
+  const exceptionReason = cleanString(body.exceptionReason);
   const errors = [];
 
-  if (!record.staffId) errors.push('Missing employee/staff ID');
   if (!cleanString(record.name)) errors.push('Missing employee name');
-
-  if (!employee) {
-    errors.push('Employee ID not found in authoritative directory');
-  }
 
   if (!cleanString(record.email)) {
     errors.push('Verified email is required');
   } else if (!EMAIL_REGEX.test(cleanString(record.email))) {
     errors.push('Invalid email format');
-  } else if (
-    employee?.email &&
-    cleanString(record.email).toLowerCase() !==
-      cleanString(employee.email).toLowerCase()
-  ) {
-    errors.push('Email differs from the employee directory; verify before approval');
   }
 
   if (!cleanString(record.phone)) {
     errors.push('Verified mobile number is required');
   } else if (cleanString(record.phone).replace(/\D/g, '').length < 10) {
     errors.push('Invalid phone number');
-  } else if (
-    employee?.phone &&
-    cleanString(record.phone).replace(/\D/g, '') !==
-      cleanString(employee.phone).replace(/\D/g, '')
-  ) {
-    errors.push('Mobile number differs from the employee directory; verify before approval');
   }
 
   const salary = normalizeSalary(
@@ -522,6 +469,7 @@ router.patch('/:id/records/:recordId', requireAuth, async (req, res) => {
   record.valid = errors.length === 0 && !record.excluded;
   record.reviewedBy = req.user.id;
   record.reviewedAt = new Date();
+  if (exceptionReason.length >= 5) record.exceptionReason = exceptionReason;
 
   await record.save();
 
@@ -551,14 +499,13 @@ router.patch('/:id/records/:recordId', requireAuth, async (req, res) => {
     'success',
     {
       uploadId: upload._id,
-      staffId: record.staffId,
     },
   );
 
   return res.json({ record });
 });
 
-router.post('/:id/submit', requireRole('incharge', 'admin'), async (req, res) => {
+router.post('/:id/submit', requireRole('admin'), async (req, res) => {
   try {
     const campaign = await createCampaignFromUpload(
       req,

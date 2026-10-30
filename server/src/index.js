@@ -124,6 +124,14 @@ async function start() {
   const appModule = await import('./app.js');
   app = appModule.default;
 
+  const port = Number(process.env.PORT || 4000);
+
+  server = app.listen(port, () => {
+    console.info(
+      `SGGS Salary Notification API listening on port ${port}`
+    );
+  });
+
   await bootstrapSettings();
 
   if (redisEnabled) {
@@ -155,14 +163,6 @@ async function start() {
       'Redis disabled: queue-based jobs, workers, and reconciliation will not run.'
     );
   }
-
-  const port = Number(process.env.PORT || 4000);
-
-  server = app.listen(port, () => {
-    console.info(
-      `SGGS Salary Notification API listening on port ${port}`
-    );
-  });
 
   await runRetentionTasks().catch(error => {
     console.error(

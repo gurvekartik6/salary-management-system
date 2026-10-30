@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import {
   Campaign,
+  DispatchOutbox,
   ExtractedRecord,
   Upload,
   DeliveryJob,
@@ -50,6 +51,15 @@ export async function createCampaignFromUpload(req, uploadId, title, channels) {
     throw httpError('Upload not found or not ready for submission', 404);
   }
 
+  const idempotencyKey = String(req.get?.('idempotency-key') || '').trim().slice(0, 200);
+  if (idempotencyKey) {
+    const existing = await Campaign.findOne({
+      owner: req.user.id,
+      idempotencyKey
+    });
+    if (existing) return existing;
+  }
+
   const allRecords = await ExtractedRecord.find({
     upload: upload._id
   }).lean();
@@ -57,7 +67,7 @@ export async function createCampaignFromUpload(req, uploadId, title, channels) {
   const records = allRecords.filter(record => !record.excluded);
 
   if (!records.length) {
-    throw httpError('No included employee records are available');
+    throw httpError('No included recipient records are available');
   }
 
   const invalid = records.filter(record =>
@@ -126,17 +136,17 @@ export async function createCampaignFromUpload(req, uploadId, title, channels) {
     }
 
     recipients.push({
-      // Staff ID is optional. Never invent one.
-      staffId: record.staffId || '',
       name: String(record.name).trim(),
       email,
       phone,
       language: record.language || 'en',
       salaryAmount: record.salaryAmount,
       salaryPeriod: record.salaryPeriod,
+      salaryDetails: record.raw || {},
       sourceRecord: record._id,
       sourceRow: record.sourceRow,
-      sourceSheet: record.sourceSheet
+      sourceSheet: record.sourceSheet,
+      exceptionApprovedBy: record.exceptionApprovedBy
     });
   }
 
@@ -154,6 +164,7 @@ export async function createCampaignFromUpload(req, uploadId, title, channels) {
 
   const campaign = await Campaign.create({
     reference: makeRef('SGGS-CAM'),
+    idempotencyKey: idempotencyKey || undefined,
     title: String(title || upload.originalName).slice(0, 160),
     owner: req.user.id,
     ownerRole: req.user.role,
@@ -256,12 +267,11 @@ export async function prepareCampaignSnapshot(campaign) {
         template,
         recipient,
         campaign,
-        { collegeName }
+        { collegeName, channel }
       );
 
       messages.push({
         recipientIndex: i,
-        staffId: recipient.staffId,
         name: recipient.name,
         email: recipient.email,
         phone: recipient.phone,
@@ -291,7 +301,6 @@ export async function prepareCampaignSnapshot(campaign) {
     reference: campaign.reference,
     version: campaign.version,
     recipients: campaign.recipients.map(recipient => ({
-      staffId: recipient.staffId,
       email: recipient.email,
       phone: recipient.phone,
       salaryAmount: recipient.salaryAmount?.toString?.(),
@@ -630,7 +639,7 @@ export async function approveCampaign(req, campaignId, scheduleAt) {
         },
         status: chosenSchedule ? 'scheduled' : 'approved',
         scheduleAt: chosenSchedule,
-        dispatchEnqueuedAt: new Date()
+        dispatchEnqueuedAt: undefined
       }
     },
     {
@@ -652,6 +661,21 @@ export async function approveCampaign(req, campaignId, scheduleAt) {
 
   let queueEnqueued = true;
 
+  await DispatchOutbox.findOneAndUpdate(
+    { campaign: approved._id },
+    {
+      $set: {
+        version: approved.version,
+        status: 'pending',
+        attempts: 0,
+        nextAttemptAt: new Date(),
+        lastError: undefined
+      },
+      $setOnInsert: { campaign: approved._id }
+    },
+    { upsert: true }
+  );
+
   try {
     await getNotificationQueue().add(
       'dispatch-campaign',
@@ -665,8 +689,23 @@ export async function approveCampaign(req, campaignId, scheduleAt) {
         removeOnComplete: true
       }
     );
+    await Campaign.updateOne(
+      { _id: approved._id, version: approved.version },
+      { $set: { dispatchEnqueuedAt: new Date() } }
+    );
+    await DispatchOutbox.updateOne(
+      { campaign: approved._id, version: approved.version },
+      { $set: { status: 'enqueued', enqueuedAt: new Date(), lastError: undefined } }
+    );
   } catch (error) {
     queueEnqueued = false;
+    await DispatchOutbox.updateOne(
+      { campaign: approved._id, version: approved.version },
+      {
+        $set: { status: 'failed', lastError: String(error.message).slice(0, 500), nextAttemptAt: new Date(Date.now() + 60000) },
+        $inc: { attempts: 1 }
+      }
+    );
 
     console.error(
       'Approved campaign dispatch enqueue deferred to queue reconciliation:',
@@ -713,6 +752,7 @@ export async function createNewCampaignVersion(req, campaignId, updates) {
   delete copy.id;
   delete copy.createdAt;
   delete copy.updatedAt;
+  delete copy.idempotencyKey;
 
   copy.reference = makeRef('SGGS-CAM');
   copy.version = source.version + 1;

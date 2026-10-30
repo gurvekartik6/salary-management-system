@@ -28,7 +28,6 @@ import {
   Search,
   Settings,
   ShieldCheck,
-  Users,
   UploadCloud,
   UserRound,
   X,
@@ -140,7 +139,7 @@ function Login({ onLogin }) {
         method: "POST",
         body: { email, password },
       });
-      onLogin(d.user);
+      onLogin(d);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -258,6 +257,14 @@ function Shell({ user, onLogout, children }) {
       .then((d) => setSite(d.content || {}))
       .catch(() => {});
   }, []);
+  useEffect(() => {
+    if (!mobileOpen) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setMobileOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [mobileOpen]);
   const current =
     nav.find((item) => item.to === location.pathname) ||
     nav.find(
@@ -270,7 +277,11 @@ function Shell({ user, onLogout, children }) {
   return (
     <DynamicCopy dictionary={uiCopy}>
       <div className="app-shell">
-        <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
+        <aside
+          id="admin-sidebar"
+          className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}
+          aria-label="Administration navigation"
+        >
           <div className="sidebar-brand">
             {site.header?.logoUrl || site.home?.logoUrl ? (
               <img
@@ -331,6 +342,8 @@ function Shell({ user, onLogout, children }) {
               className="icon-button menu-toggle"
               onClick={() => setMobileOpen(true)}
               aria-label="Open menu"
+              aria-expanded={mobileOpen}
+              aria-controls="admin-sidebar"
             >
               <span className="hamburger">☰</span>
             </button>
@@ -374,13 +387,36 @@ function Shell({ user, onLogout, children }) {
   );
 }
 function PageHeading({ eyebrow, title, description, action }) {
+  const location = useLocation();
+  const [dynamic, setDynamic] = useState(null);
+  useEffect(() => {
+    const pageKey = {
+      "/admin": "admin",
+      "/admin/campaigns": "campaigns",
+      "/admin/uploads": "uploads",
+      "/admin/miscellaneous": "miscellaneous",
+      "/admin/templates": "templates",
+      "/admin/reports": "reports",
+      "/admin/audit": "audit",
+      "/admin/usage": "usage",
+      "/admin/settings": "settings",
+      "/admin/backups": "backups",
+    }[location.pathname];
+    if (!pageKey) return;
+    api("/site/content")
+      .then((response) => setDynamic(response.content?.[pageKey]?.content || null))
+      .catch(() => {});
+  }, [location.pathname]);
   return (
     <div className="page-heading">
       <div>
         {eyebrow && <div className="eyebrow">{eyebrow}</div>}
-        <h1>{title}</h1>
-        {description && <p>{description}</p>}
+        <h1>{dynamic?.title || title}</h1>
+        {(dynamic?.description || dynamic?.subtitle || description) && (
+          <p>{dynamic?.description || dynamic?.subtitle || description}</p>
+        )}
       </div>
+      {dynamic?.imageUrl && <img src={dynamic.imageUrl} alt="" className="page-heading-image" />}
       {action}
     </div>
   );
@@ -412,6 +448,7 @@ function Stat({ label, value, note, icon: Icon }) {
 }
 
 function UploadsPage({ admin = false }) {
+  const navigate = useNavigate();
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [uploads, setUploads] = useState([]);
@@ -479,12 +516,22 @@ function UploadsPage({ admin = false }) {
       setError(e.message);
     }
   }
+  async function deleteUpload(upload) {
+    if (!window.confirm(`Delete uploaded document "${upload.originalName}"?`)) return;
+    try {
+      await api(`/uploads/${upload._id}`, { method: "DELETE" });
+      if (selected?._id === upload._id) setSelected(null);
+      setSuccess("Uploaded document deleted.");
+      await load();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
   async function saveRecord(record, extra = {}) {
     try {
       const d = await api(`/uploads/${selected._id}/records/${record._id}`, {
         method: "PATCH",
         body: {
-          staffId: record.staffId,
           name: record.name,
           email: record.email,
           phone: record.phone,
@@ -498,7 +545,7 @@ function UploadsPage({ admin = false }) {
       setRecords((old) =>
         old.map((r) => (r._id === record._id ? d.record : r)),
       );
-      setSuccess(`Saved record ${record.staffId || record._id}.`);
+      setSuccess("Salary record updated.");
     } catch (e) {
       setError(e.message);
     }
@@ -515,7 +562,7 @@ function UploadsPage({ admin = false }) {
         `Campaign ${d.campaign.reference} created. Review its personalized messages in Campaigns before approving it.`,
       );
       setSelected(null);
-      await load();
+      navigate(`/admin/campaigns/${d.campaign._id}`);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -527,7 +574,6 @@ function UploadsPage({ admin = false }) {
       old.includes(ch) ? old.filter((x) => x !== ch) : [...old, ch],
     );
 
-  const hasStaffIds = records.some((record) => String(record.staffId || "").trim() !== "");
   const hasSalary = records.some((record) => record.salaryAmount !== undefined && record.salaryAmount !== null && String(record.salaryAmount).trim() !== "");
 
   return (
@@ -558,7 +604,7 @@ function UploadsPage({ admin = false }) {
               {
                 title: "Wait for processing",
                 description:
-                  "The system extracts rows, performs OCR when needed and checks staff IDs.",
+                  "The system extracts salary rows and validates the contact details supplied in the uploaded document.",
               },
               {
                 title: "Review records",
@@ -628,15 +674,15 @@ function UploadsPage({ admin = false }) {
           ) : (
             <div className="upload-list">
               {uploads.map((u) => (
-                <button
+                <div
                   className={`upload-item ${selected?._id === u._id ? "selected" : ""}`}
                   key={u._id}
-                  onClick={() => viewUpload(u)}
                 >
-                  <span className="file-icon">
+                  <button className="upload-item-main" onClick={() => viewUpload(u)}>
+                    <span className="file-icon">
                     <FileText size={18} />
-                  </span>
-                  <span className="upload-item-text">
+                    </span>
+                    <span className="upload-item-text">
                     <strong>{u.originalName}</strong>
                     <small>
                       {u.reference} · {formatDate(u.createdAt)}
@@ -645,9 +691,13 @@ function UploadsPage({ admin = false }) {
                       {u.rowCount ?? "—"} rows · {u.validCount ?? "—"} valid ·{" "}
                       {u.invalidCount ?? "—"} issues
                     </span>
-                  </span>
-                  <Status value={u.status} />
-                </button>
+                    </span>
+                    <Status value={u.status} />
+                  </button>
+                  <Button variant="ghost" className="button-small" onClick={() => deleteUpload(u)}>
+                    Delete
+                  </Button>
+                </div>
               ))}
             </div>
           )}
@@ -678,11 +728,22 @@ function UploadsPage({ admin = false }) {
               processing completes.
             </p>
           ) : null}
+          {selected.status === "failed" && (
+            <Alert
+              error={selected.errors?.join("; ") || "Processing failed. Re-upload the file after correcting its format."}
+              onClose={() => {}}
+            />
+          )}
+          {selected.status === "review" && (
+            <div className="helper-text">
+              {selected.validCount || 0} valid · {selected.invalidCount || 0} require correction · {selected.duplicateCount || 0} duplicate contacts.
+              Campaign creation remains blocked until every included record is valid.
+            </div>
+          )}
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  {hasStaffIds && <th>Staff ID</th>}
                   <th>Name</th>
                   <th>Email</th>
                   <th>Mobile</th>
@@ -698,7 +759,6 @@ function UploadsPage({ admin = false }) {
                     record={r}
                     onSave={saveRecord}
                     admin={admin}
-                    showStaffId={hasStaffIds}
                     showSalary={hasSalary}
                   />
                 ))}
@@ -735,7 +795,7 @@ function UploadsPage({ admin = false }) {
               >
                 Create campaign and review
               </Button>
-              <p className="helper-text">Only the channels you select will be included. An unselected SMS or WhatsApp provider is not required. After creation, review every personalized message in Campaigns before approving delivery.</p>
+              <p className="helper-text">Select every channel you want included. Provider configuration is checked again during approval; phone numbers must be valid international numbers for SMS or WhatsApp. After creation, review every personalized message before approving delivery.</p>
             </div>
           )}
         </section>
@@ -743,7 +803,7 @@ function UploadsPage({ admin = false }) {
     </>
   );
 }
-function EditableRecord({ record, onSave, admin = false, showStaffId = false, showSalary = false }) {
+function EditableRecord({ record, onSave, admin = false, showSalary = false }) {
   const [r, setR] = useState(record);
   const [saving, setSaving] = useState(false);
 
@@ -763,16 +823,6 @@ function EditableRecord({ record, onSave, admin = false, showStaffId = false, sh
 
   return (
     <tr>
-      {showStaffId && (
-        <td>
-          <input
-            className="table-input"
-            value={r.staffId || ""}
-            onChange={(e) => setR({ ...r, staffId: e.target.value.toUpperCase() })}
-            aria-label="Staff ID"
-          />
-        </td>
-      )}
 
       <td>
         <input
@@ -820,7 +870,7 @@ function EditableRecord({ record, onSave, admin = false, showStaffId = false, sh
       )}
 
       <td>
-        <Status value={r.matchStatus} />
+        <Status value={r.valid ? "valid" : "needs_review"} />
 
         {r.errors?.length > 0 && (
           <small className="error-small">
@@ -898,6 +948,21 @@ function CampaignsPage({ admin = false }) {
           ? "Cancellation request recorded. An administrator must review it."
           : `Campaign action completed: ${action.replaceAll("-", " ")}.`,
       );
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+  async function deleteCampaign(campaign) {
+    if (!window.confirm(`Delete campaign "${campaign.title}"? Only inactive campaigns can be deleted.`)) return;
+    setBusyId(`${campaign._id}delete`);
+    try {
+      await api(`${admin ? "/admin/campaigns" : "/campaigns"}/${campaign._id}`, {
+        method: "DELETE",
+      });
+      setSuccess("Campaign deleted.");
       await load();
     } catch (e) {
       setError(e.message);
@@ -1014,6 +1079,17 @@ function CampaignsPage({ admin = false }) {
                               onClick={() => action(c._id, "cancel")}
                             >
                               Cancel
+                            </Button>
+                          )}
+                        {admin &&
+                          ["draft", "awaiting_approval", "rejected", "cancelled", "failed", "completed", "partial_failure"].includes(c.status) && (
+                            <Button
+                              variant="ghost"
+                              className="button-small"
+                              loading={busyId === `${c._id}delete`}
+                              onClick={() => deleteCampaign(c)}
+                            >
+                              Delete
                             </Button>
                           )}
                         {!admin &&
@@ -1256,7 +1332,7 @@ function CampaignDetails({ user }) {
           label="Recipients"
           value={campaign.recipients?.length || 0}
           note="Unique employees"
-          icon={Users}
+          icon={UserRound}
         />
         <Stat
           label="Delivered"
@@ -1292,7 +1368,7 @@ function CampaignDetails({ user }) {
           <div className="review-warning">
             <ShieldCheck size={17} />
             <p>
-              Salary amounts are confidential. Verify the staff ID, employee,
+              Salary amounts are confidential. Verify the employee,
               language, contact mapping and message content. The preview is
               versioned; any content change requires a fresh review.
             </p>
@@ -1336,14 +1412,18 @@ function CampaignDetails({ user }) {
                 </div>
               </div>
               <div className="preview-list">
-                {preview.items.map((recipient) => (
+                {preview.items.map((recipient, recipientIndex) => (
                   <article
                     className="preview-recipient"
-                    key={recipient.staffId}
+                    key={
+                      recipient.sourceRecord ||
+                      recipient.email ||
+                      `${recipient.sourceSheet || "sheet"}-${recipient.sourceRow || recipientIndex}`
+                    }
                   >
                     <div className="preview-recipient-head">
                       <strong>{recipient.name}</strong>
-                      <span>Staff ID: {recipient.staffId}</span>
+
                       <span>
                         Source:{" "}
                         {recipient.sourceSheet
@@ -1362,7 +1442,10 @@ function CampaignDetails({ user }) {
                       </span>
                     </div>
                     {recipient.messages.map((m, i) => (
-                      <div className="message-preview" key={m.channel + i}>
+                      <div
+                        className="message-preview"
+                        key={`${m.channel}-${m.email || m.phone || "recipient"}-${i}`}
+                      >
                         <div className="message-preview-head">
                           <strong>{m.channel.toUpperCase()}</strong>
                           <span>
@@ -1543,8 +1626,7 @@ function CampaignDetails({ user }) {
             <table>
               <thead>
                 <tr>
-                  <th>Staff ID</th>
-                  <th>Contact</th>
+                <th>Contact</th>
                   <th>Channel</th>
                   <th>Status</th>
                   <th>Attempts</th>
@@ -1554,7 +1636,6 @@ function CampaignDetails({ user }) {
               <tbody>
                 {deliveries.map((d) => (
                   <tr key={d.id}>
-                    <td>{d.staffId}</td>
                     <td>{d.contact}</td>
                     <td>{d.channel}</td>
                     <td>
@@ -1704,6 +1785,16 @@ function ReportsPage({ admin = false }) {
       setBusy(false);
     }
   }
+  async function deleteReport(report) {
+    if (!window.confirm(`Delete report "${report.reference}" and its generated file?`)) return;
+    try {
+      await api(`/reports/${report._id}`, { method: "DELETE" });
+      setSuccess("Report deleted.");
+      await load();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
   return (
     <>
       <PageHeading
@@ -1843,6 +1934,9 @@ function ReportsPage({ admin = false }) {
                       <ArrowDownToLine size={15} /> Download
                     </Button>
                   )}
+                  <Button variant="ghost" className="button-small" onClick={() => deleteReport(r)}>
+                    Delete
+                  </Button>
                 </div>
               ))}
             </div>
@@ -1963,14 +2057,9 @@ function AdminOverview() {
                 "Check providers, languages, retention and upload policies.",
             },
             {
-              title: "Manage employee directories",
-              description:
-                "Keep employee records accurate and verify contact details before creating a campaign.",
-            },
-            {
               title: "Review documents and exceptions",
               description:
-                "Confirm employee ID matches and resolve unmatched records.",
+                "Review uploaded salary rows and correct missing or invalid contact details.",
             },
             {
               title: "Review campaign messages",
@@ -2028,59 +2117,199 @@ function AdminOverview() {
   );
 }
 
+const employeePayrollFields = [
+  "Sl.", "Abbr", "Basic + Grade pay", "DA", "HRA", "TA", "Wash All.",
+  "Special Pay", "GROSS PAY", "GPF", "CPF", "PT", "IT", "LIC", "Society",
+  "Other", "Bus", "GLSI", "Bank Loan", "Group Insurance", "CM Fund",
+  "IT 2025-26", "Saff Adv", "Fest Adv",
+  "House Maintanace Recovery & Electricity Charges",
+  "SGGS Employee Health Checkup Fees", "Alumni-24 Reg. Fees",
+  "Sashastra Sena Dwajdin Nidhi 2024-25", "Revenue Stamp Fees",
+  "Total Deduct", "NET PAY",
+];
+
+function emptyPayrollDetails() {
+  return Object.fromEntries(employeePayrollFields.map((field) => [field, ""]));
+}
+
 function EmployeesPage() {
   const [items, setItems] = useState([]);
   const [q, setQ] = useState("");
-  const [payrollId, setPayrollId] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
+  const [panNumber, setPanNumber] = useState("");
+  const [payrollDetails, setPayrollDetails] = useState(emptyPayrollDetails);
   const [language, setLanguage] = useState("en");
   const [csv, setCsv] = useState("");
+  const [importFile, setImportFile] = useState(null);
+  const [lastImportId, setLastImportId] = useState("");
+  const [importMode, setImportMode] = useState("file");
+  const [editing, setEditing] = useState(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [busy, setBusy] = useState(false);
   async function load() {
-    const d = await api(`/admin/employees?q=${encodeURIComponent(q)}&limit=100`);
+    const d = await api(`/admin/employees?q=${encodeURIComponent(q)}&status=all&limit=200`);
     setItems(d.items || []);
   }
   useEffect(() => { load().catch((e) => setError(e.message)); }, []);
-  async function add(e) {
-    e.preventDefault(); setError(""); setSuccess("");
+  function clearForm() {
+    setName(""); setEmail(""); setPhone(""); setPanNumber(""); setPayrollDetails(emptyPayrollDetails()); setLanguage("en"); setEditing(null);
+  }
+  async function save(e) {
+    e.preventDefault(); setError(""); setSuccess(""); setBusy(true);
     try {
-      const d = await api("/admin/employees", { method: "POST", body: { payrollId, name, email, phone, language } });
-      setSuccess(`Employee saved. Generated staff ID: ${d.employee.staffId}`);
-      setPayrollId(""); setName(""); setEmail(""); setPhone(""); setLanguage("en"); await load();
+      const body = { name, email, phone, panNumber, language, payrollDetails };
+      if (editing) {
+        await api(`/admin/employees/${editing._id}`, { method: "PATCH", body });
+        setSuccess("Employee updated successfully.");
+      } else {
+        await api("/admin/employees", { method: "POST", body });
+        setSuccess("Employee added successfully.");
+      }
+      clearForm(); await load();
     } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+  async function importFileEmployees(e) {
+    e.preventDefault();
+    if (!importFile) return;
+    setBusy(true); setError(""); setSuccess("");
+    try {
+      const form = new FormData();
+      form.append("file", importFile);
+      const d = await api("/admin/employees/import-file", { method: "POST", body: form });
+      const detail = d.errors?.length ? ` First issue: ${d.errors[0].name || "row"} — ${d.errors[0].reason}.` : "";
+      setSuccess(`File import complete: ${d.created} added, ${d.updated} updated, ${d.rejected} rejected.${detail}`);
+      setLastImportId(d.importId || "");
+      setImportFile(null); e.target.reset(); await load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+  async function previewFileEmployees() {
+    if (!importFile) return;
+    setBusy(true); setError(""); setSuccess("");
+    try {
+      const form = new FormData();
+      form.append("file", importFile);
+      const d = await api("/admin/employees/import-file?preview=true", { method: "POST", body: form });
+      setSuccess(`Preview: ${d.created} additions, ${d.updated} updates, ${d.rejected} rejected. Submit Import employee file to apply.`);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
   }
   async function importCsv(e) {
-    e.preventDefault(); setError(""); setSuccess("");
+    e.preventDefault(); setBusy(true); setError(""); setSuccess("");
     try {
       const d = await api("/admin/employees/import-csv", { method: "POST", body: { csv } });
-      setSuccess(`Imported or updated ${d.upserted} records; rejected ${d.rejected}. Existing payroll IDs are retained and internal staff IDs are generated automatically.`);
+      const detail = d.errors?.length ? ` First issue: ${d.errors[0].name || "row"} — ${d.errors[0].reason}.` : "";
+      setSuccess(`Import complete: ${d.created} added, ${d.updated} updated, ${d.rejected} rejected.${detail}`);
+      setLastImportId(d.importId || "");
       setCsv(""); await load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+  async function previewCsv() {
+    if (!csv.trim()) return;
+    setBusy(true); setError(""); setSuccess("");
+    try {
+      const d = await api("/admin/employees/import-csv?preview=true", { method: "POST", body: { csv } });
+      setSuccess(`Preview: ${d.created} additions, ${d.updated} updates, ${d.rejected} rejected. Submit Import CSV to apply.`);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+  async function rollbackLastImport() {
+    if (!lastImportId || !window.confirm("Roll back the most recent employee import? Existing campaign-linked employees will be preserved.")) return;
+    try {
+      await api(`/admin/employees/imports/${lastImportId}/rollback`, { method: "POST", body: {} });
+      setSuccess("Employee import rolled back."); setLastImportId(""); await load();
+    } catch (e) { setError(e.message); }
+  }
+  async function toggleActive(employee) {
+    const next = !employee.active;
+    if (!window.confirm(`${next ? "Reactivate" : "Deactivate"} ${employee.name}? Historical salary and bill records will be preserved.`)) return;
+    try {
+      await api(`/admin/employees/${employee._id}`, { method: "PATCH", body: { active: next } });
+      setSuccess(`Employee ${next ? "reactivated" : "deactivated"}.`); await load();
+    } catch (e) { setError(e.message); }
+  }
+  async function deleteEmployee(employee) {
+    if (!window.confirm(`Delete ${employee.name}? The record will be deactivated and historical campaign data will be preserved.`)) return;
+    try {
+      await api(`/admin/employees/${employee._id}`, { method: "DELETE" });
+      setSuccess("Employee deleted.");
+      await load();
+    } catch (e) { setError(e.message); }
+  }
+  function beginEdit(employee) {
+    setEditing(employee); setName(employee.name || ""); setEmail(employee.email || "");
+    setPhone(employee.phone || ""); setPanNumber(employee.panNumber || "");
+    setPayrollDetails({ ...emptyPayrollDetails(), ...(employee.payrollDetails || {}) });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  async function exportEmployees(format) {
+    setError("");
+    try {
+      const response = await fetch(`/api/admin/employees/export/${format}?q=${encodeURIComponent(q)}&status=all`, { credentials: "include" });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || `Export failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `sggs-employees.${format}`;
+      link.click();
+      URL.revokeObjectURL(url);
     } catch (e) { setError(e.message); }
   }
   return <>
-    <PageHeading eyebrow="EMPLOYEE DIRECTORY" title="Employee directory" description="Maintain college employees. The system generates an internal staff ID automatically; payroll ID is optional and is used to match existing salary files." />
+    <PageHeading eyebrow="EMPLOYEE DIRECTORY" title="Employees" description="Add, update, delete and import employees. Email is the unique employee identifier; payroll fields from imported salary files are retained." />
     <Alert error={error} success={success} onClose={() => { setError(""); setSuccess(""); }} />
     <section className="panel">
-      <div className="panel-title"><div><h2>Add employee</h2><p className="muted">Internal staff ID is generated when the record is saved.</p></div><Users size={20} className="muted-icon" /></div>
-      <form className="form-grid" onSubmit={add}>
+      <div className="panel-title"><div><h2>{editing ? "Update employee" : "Add employee"}</h2><p className="muted">Name, unique email address and preferred language. Phone number is optional.</p></div><Users size={20} className="muted-icon" /></div>
+      <form className="form-grid" onSubmit={save}>
         <Field label="Employee name" value={name} onChange={(e) => setName(e.target.value)} required />
-        <Field label="Payroll / existing ID (optional)" value={payrollId} onChange={(e) => setPayrollId(e.target.value)} placeholder="Existing ID printed on salary file" />
-        <Field label="Verified email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-        <Field label="Verified mobile" value={phone} onChange={(e) => setPhone(e.target.value)} />
-        <label className="field"><span>Language</span><select value={language} onChange={(e) => setLanguage(e.target.value)}><option value="en">English</option><option value="mr">Marathi</option><option value="hi">Hindi</option></select></label>
-        <div className="form-action"><Button type="submit">Generate ID and save</Button></div>
+        <Field label="Email address" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <Field label="Phone number (optional)" value={phone} onChange={(e) => setPhone(e.target.value)} />
+        <Field label="PAN number (optional)" value={panNumber} onChange={(e) => setPanNumber(e.target.value)} />
+        <div className="field field-span">
+          <span>Salary and deduction information</span>
+          <div className="form-grid">
+            {employeePayrollFields.map((field) => (
+              <Field
+                key={field}
+                label={field}
+                value={payrollDetails[field] ?? ""}
+                onChange={(e) => setPayrollDetails({ ...payrollDetails, [field]: e.target.value })}
+              />
+            ))}
+          </div>
+        </div>
+        <label className="field"><span>Preferred language</span><select value={language} onChange={(e) => setLanguage(e.target.value)}><option value="en">English</option><option value="mr">Marathi</option><option value="hi">Hindi</option></select></label>
+        <div className="form-action"><Button type="submit" loading={busy}>{editing ? "Save changes" : "Add employee"}</Button>{editing && <Button type="button" variant="secondary" onClick={clearForm}>Cancel edit</Button>}</div>
       </form>
     </section>
     <section className="panel">
-      <div className="panel-title"><div><h2>Import employee directory</h2><p className="muted">CSV headers: name, payrollId (or staffId), email, phone, language. Staff ID is generated for new records.</p></div></div>
-      <form className="stack" onSubmit={importCsv}><label className="field"><span>Paste CSV content</span><textarea rows="4" value={csv} onChange={(e) => setCsv(e.target.value)} placeholder={'payrollId,name,email,phone,language\nSG001,Employee Name,employee@sggs.ac.in,+919999999999,en'} /></label><Button type="submit" disabled={!csv.trim()}>Import CSV</Button></form>
+      <div className="panel-title"><div><h2>Import employees</h2><p className="muted">Import one employee file or paste CSV content. CSV, XLSX, and XLS salary files are supported, including files without email addresses.</p></div></div>
+      <label className="field"><span>Import method</span><select value={importMode} onChange={(e) => setImportMode(e.target.value)}><option value="file">Upload CSV / Excel file</option><option value="paste">Paste CSV content</option></select></label>
+      {importMode === "file" ? (
+        <form className="stack" onSubmit={importFileEmployees}>
+          <label className="field"><span>Employee CSV / Excel file</span><input type="file" accept=".csv,.xlsx,.xls" onChange={(e) => setImportFile(e.target.files?.[0] || null)} /></label>
+          <div className="table-actions"><Button type="button" variant="secondary" disabled={!importFile || busy} onClick={previewFileEmployees}>Preview changes</Button><Button type="submit" disabled={!importFile} loading={busy}>Import employee file</Button></div>
+        </form>
+      ) : (
+        <form className="stack" onSubmit={importCsv}>
+          <label className="field"><span>Paste CSV content</span><textarea rows="6" value={csv} onChange={(e) => setCsv(e.target.value)} placeholder={"name,email,phone,language\nEmployee Name,employee@sggs.ac.in,,en"} /></label>
+          <div className="table-actions"><Button type="button" variant="secondary" disabled={!csv.trim() || busy} onClick={previewCsv}>Preview changes</Button><Button type="submit" disabled={!csv.trim()} loading={busy}>Import CSV</Button></div>
+        </form>
+      )}
+      {lastImportId ? <Button type="button" variant="secondary" onClick={rollbackLastImport}>Roll back last import</Button> : null}
     </section>
     <section className="panel">
-      <div className="panel-title"><div><h2>Directory records</h2><p className="muted">{items.length} shown</p></div><form className="search-form" onSubmit={(e) => { e.preventDefault(); load().catch((err) => setError(err.message)); }}><Search size={16} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search staff ID, payroll ID or name" /><button type="submit">Search</button></form></div>
-      {items.length === 0 ? <Empty title="No employees found" text="Add records or import an approved directory export." /> : <div className="table-wrap"><table><thead><tr><th>Generated staff ID</th><th>Payroll ID</th><th>Name</th><th>Email</th><th>Mobile</th><th>Language</th><th>Status</th></tr></thead><tbody>{items.map((i) => <tr key={i._id}><td><strong>{i.staffId}</strong></td><td>{i.payrollId || "—"}</td><td>{i.name}</td><td>{i.email || "—"}</td><td>{i.phone || "—"}</td><td>{{ en: "English", mr: "Marathi", hi: "Hindi" }[i.language]}</td><td><Status value={i.active ? "active" : "inactive"} /></td></tr>)}</tbody></table></div>}
+      <div className="panel-title"><div><h2>Employee directory</h2><p className="muted">{items.length} records shown</p></div><div className="stack"><form className="search-form" onSubmit={(e) => { e.preventDefault(); load().catch((err) => setError(err.message)); }}><Search size={16} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, email or phone" /><button type="submit">Search</button></form><div className="table-actions"><Button variant="secondary" className="button-small" onClick={() => exportEmployees("csv")}>Generate CSV</Button><Button variant="secondary" className="button-small" onClick={() => exportEmployees("xlsx")}>Generate Excel</Button><Button variant="secondary" className="button-small" onClick={() => exportEmployees("pdf")}>Generate PDF</Button></div></div></div>
+      {items.length === 0 ? <Empty title="No employees found" text="Import the supplied faculty list or add employees above." /> : <div className="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>PAN</th><th>Language</th><th>Status</th><th>Operations</th></tr></thead><tbody>{items.map((i) => <tr key={i._id}><td><strong>{i.name}</strong></td><td>{i.email}</td><td>{i.phone || "—"}</td><td>{i.panNumber || "—"}</td><td>{{ en: "English", mr: "Marathi", hi: "Hindi" }[i.language] || "English"}</td><td><Status value={i.active ? "active" : "inactive"} /></td><td><div className="table-actions"><Button variant="secondary" className="button-small" onClick={() => beginEdit(i)}>Edit</Button><Button variant="secondary" className="button-small" onClick={() => toggleActive(i)}>{i.active ? "Deactivate" : "Reactivate"}</Button><Button variant="secondary" className="button-small" onClick={() => deleteEmployee(i)}>Delete</Button></div></td></tr>)}</tbody></table></div>}
     </section>
   </>;
 }
@@ -2096,6 +2325,25 @@ function MiscellaneousPage() {
   useEffect(() => { load().catch(e => setError(e.message)); }, []);
   async function add(e) { e.preventDefault(); setError(""); setSuccess(""); try { const d = await api("/admin/bills", { method: "POST", body: { title, billNumber, recipientName, recipientEmail, organization, amount, issueDate: issueDate || undefined, dueDate: dueDate || undefined, notes } }); setSuccess(`Bill saved: ${d.bill.reference}`); setTitle(""); setBillNumber(""); setRecipientName(""); setRecipientEmail(""); setOrganization(""); setAmount(""); setIssueDate(""); setDueDate(""); setNotes(""); await load(); } catch (e) { setError(e.message); } }
   async function send(item) { setError(""); setSuccess(""); try { await api(`/admin/bills/${item._id}/send`, { method: "POST", body: {} }); setSuccess(`Bill email sent to ${item.recipientEmail}.`); await load(); } catch (e) { setError(e.message); } }
+  async function editDraft(item) {
+    if (item.status !== "draft") return;
+    const title = window.prompt("Bill title / purpose", item.title);
+    if (title === null) return;
+    const amount = window.prompt("Amount (INR)", String(item.amount || ""));
+    if (amount === null) return;
+    const recipientEmail = window.prompt("Recipient email", item.recipientEmail);
+    if (recipientEmail === null) return;
+    try {
+      await api(`/admin/bills/${item._id}`, { method: "PATCH", body: { title, amount, recipientEmail } });
+      setSuccess("Draft bill updated."); await load();
+    } catch (e) { setError(e.message); }
+  }
+  async function removeDraft(item) {
+    if (item.status === "sent") return;
+    if (!window.confirm(`Delete bill ${item.reference}? This cannot be undone.`)) return;
+    try { await api(`/admin/bills/${item._id}`, { method: "DELETE", body: {} }); setSuccess("Bill deleted."); await load(); }
+    catch (e) { setError(e.message); }
+  }
   return <>
     <PageHeading eyebrow="MISCELLANEOUS BILLS" title="Miscellaneous bill management" description="Create and track non-salary bills, record the recipient and amount, and email bill details to the recipient." />
     <Alert error={error} success={success} onClose={() => { setError(""); setSuccess(""); }} />
@@ -2103,7 +2351,7 @@ function MiscellaneousPage() {
       <form className="form-grid" onSubmit={add}><Field label="Bill title / purpose" value={title} onChange={e => setTitle(e.target.value)} required /><Field label="Bill number (optional)" value={billNumber} onChange={e => setBillNumber(e.target.value)} /><Field label="Recipient name" value={recipientName} onChange={e => setRecipientName(e.target.value)} required /><Field label="Recipient email" type="email" value={recipientEmail} onChange={e => setRecipientEmail(e.target.value)} required /><Field label="Organization / vendor" value={organization} onChange={e => setOrganization(e.target.value)} /><Field label="Amount (₹)" type="number" value={amount} onChange={e => setAmount(e.target.value)} required /><Field label="Issue date" type="date" value={issueDate} onChange={e => setIssueDate(e.target.value)} /><Field label="Due date" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} /><label className="field field-span"><span>Notes</span><textarea rows="2" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Bill description or payment instructions" /></label><div className="form-action"><Button type="submit">Save bill</Button></div></form>
     </section>
     <section className="panel"><div className="panel-title"><div><h2>Bill records</h2><p className="muted">{items.length} shown</p></div><form className="search-form" onSubmit={e => { e.preventDefault(); load().catch(err => setError(err.message)); }}><Search size={16} /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search bill, recipient or organization" /><button type="submit">Search</button></form></div>
-      {items.length === 0 ? <Empty title="No bills yet" text="Create a bill using the form above." /> : <div className="table-wrap"><table><thead><tr><th>Reference</th><th>Bill</th><th>Recipient</th><th>Amount</th><th>Due date</th><th>Status</th><th>Action</th></tr></thead><tbody>{items.map(i => <tr key={i._id}><td><strong>{i.reference}</strong></td><td>{i.title}<small>{i.billNumber || ""}</small></td><td>{i.recipientName}<small>{i.recipientEmail}</small></td><td>₹{Number(i.amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}</td><td>{i.dueDate ? new Date(i.dueDate).toLocaleDateString("en-IN") : "—"}</td><td><Status value={i.status} /></td><td><Button variant="secondary" className="button-small" disabled={i.status === "sent"} onClick={() => send(i)}>Send email</Button></td></tr>)}</tbody></table></div>}
+      {items.length === 0 ? <Empty title="No bills yet" text="Create a bill using the form above." /> : <div className="table-wrap"><table><thead><tr><th>Reference</th><th>Bill</th><th>Recipient</th><th>Amount</th><th>Due date</th><th>Status</th><th>Action</th></tr></thead><tbody>{items.map(i => <tr key={i._id}><td><strong>{i.reference}</strong></td><td>{i.title}<small>{i.billNumber || ""}</small></td><td>{i.recipientName}<small>{i.recipientEmail}</small></td><td>₹{Number(i.amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}</td><td>{i.dueDate ? new Date(i.dueDate).toLocaleDateString("en-IN") : "—"}</td><td><Status value={i.status} /></td><td><div className="table-actions"><Button variant="secondary" className="button-small" disabled={i.status === "sent"} onClick={() => send(i)}>{i.status === "failed" ? "Retry email" : "Send email"}</Button>{i.status === "draft" && <Button variant="secondary" className="button-small" onClick={() => editDraft(i)}>Edit draft</Button>}<Button variant="ghost" className="button-small" disabled={i.status === "sent"} onClick={() => removeDraft(i)}>Delete</Button></div></td></tr>)}</tbody></table></div>}
     </section>
   </>;
 }
@@ -2116,7 +2364,7 @@ function TemplatesPage() {
     "Salary notification for {{salary_period}}",
   );
   const [body, setBody] = useState(
-    "Dear {{employee_name}}, your salary notification for {{salary_period}} is ready. Salary amount: ₹{{salary_amount}}. Staff ID: {{staff_id}}.",
+    "Dear {{employee_name}}, your salary notification for {{salary_period}} is ready. Salary amount: ₹{{salary_amount}}.",
   );
   const [waName, setWaName] = useState("");
   const [waLanguageCode, setWaLanguageCode] = useState("en_US");
@@ -2133,15 +2381,15 @@ function TemplatesPage() {
     const examples = {
       en: {
         subject: "Salary notification for {{salary_period}}",
-        body: "Dear {{employee_name}}, your salary notification for {{salary_period}} is ready. Salary amount: ₹{{salary_amount}}. Staff ID: {{staff_id}}.",
+        body: "Dear {{employee_name}}, your salary notification for {{salary_period}} is ready. Salary amount: ₹{{salary_amount}}.",
       },
       mr: {
         subject: "{{salary_period}} साठी वेतन सूचना",
-        body: "प्रिय {{employee_name}}, {{salary_period}} साठी तुमची वेतन सूचना तयार आहे. वेतन रक्कम: ₹{{salary_amount}}. कर्मचारी क्रमांक: {{staff_id}}.",
+        body: "प्रिय {{employee_name}}, {{salary_period}} साठी तुमची वेतन सूचना तयार आहे. वेतन रक्कम: ₹{{salary_amount}}.",
       },
       hi: {
         subject: "{{salary_period}} के लिए वेतन सूचना",
-        body: "प्रिय {{employee_name}}, {{salary_period}} के लिए आपकी वेतन सूचना तैयार है। वेतन राशि: ₹{{salary_amount}}। कर्मचारी आईडी: {{staff_id}}।",
+        body: "प्रिय {{employee_name}}, {{salary_period}} के लिए आपकी वेतन सूचना तैयार है। वेतन राशि: ₹{{salary_amount}}।",
       },
     };
     setSubject(examples[language].subject);
@@ -2185,6 +2433,16 @@ function TemplatesPage() {
     try {
       await api(`/admin/templates/${id}/restore`, { method: "POST", body: {} });
       setSuccess("A new draft version was created from the selected template.");
+      await load();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+  async function removeTemplate(template) {
+    if (!window.confirm(`Delete ${template.channel.toUpperCase()} template version ${template.version}?`)) return;
+    try {
+      await api(`/admin/templates/${template._id}`, { method: "DELETE" });
+      setSuccess("Template version deleted.");
       await load();
     } catch (e) {
       setError(e.message);
@@ -2277,7 +2535,7 @@ function TemplatesPage() {
             <div className="helper-box">
               <CircleHelp size={17} />
               <p>
-                Placeholders: {"{{employee_name}}"}, {"{{staff_id}}"},{" "}
+                Placeholders: {"{{employee_name}}"}, {" "}
                 {"{{salary_amount}}"}, {"{{salary_period}}"},{" "}
                 {"{{campaign_title}}"}, {"{{college_name}}"},{" "}
                 {"{{notification_date}}"}.
@@ -2343,6 +2601,13 @@ function TemplatesPage() {
                       Restore as draft
                     </Button>
                   )}
+                  <Button
+                    variant="ghost"
+                    className="button-small"
+                    onClick={() => removeTemplate(t)}
+                  >
+                    Delete
+                  </Button>
                 </div>
               ))}
             </div>
@@ -2366,6 +2631,8 @@ function ContentPage() {
   const [footer, setFooter] = useState("SGGS · Authorized college use");
   const [logoUrl, setLogoUrl] = useState("");
   const [navigationJson, setNavigationJson] = useState("{}");
+  const [labelRows, setLabelRows] = useState([]);
+  const [pages, setPages] = useState([]);
   const [image, setImage] = useState(null);
   const [versions, setVersions] = useState([]);
   const [error, setError] = useState("");
@@ -2375,6 +2642,7 @@ function ContentPage() {
       api("/admin/site-content"),
       api(`/admin/site-content/versions?key=${encodeURIComponent(key)}`),
     ]);
+    setPages(d.pages || []);
     const item = d.content?.[key];
     const c = item?.content || {};
     setTitle(c.title || "");
@@ -2382,8 +2650,13 @@ function ContentPage() {
     setHeading(c.heading || "");
     setSubtitle(c.subtitle || c.tagline || "");
     setFooter(c.footer || c.text || "");
-    setLogoUrl(c.logoUrl || "");
+    setLogoUrl(c.logoUrl || c.imageUrl || "");
     setNavigationJson(JSON.stringify(c || {}, null, 2));
+    setLabelRows(
+      Object.entries(c || {})
+        .filter(([, value]) => typeof value === "string")
+        .map(([label, value]) => ({ label, value })),
+    );
     setVersions(h.items || []);
   }
   useEffect(() => {
@@ -2405,6 +2678,19 @@ function ContentPage() {
     setSuccess("Image uploaded. Publish content to apply it.");
     return d.url;
   }
+  async function deleteImage() {
+    if (!logoUrl.startsWith("/site-assets/")) return;
+    if (!window.confirm("Delete this uploaded image?")) return;
+    const name = logoUrl.split("/").pop();
+    const response = await fetch(`/api/admin/site-assets/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Image deletion failed");
+    setLogoUrl("");
+    setSuccess("Image deleted.");
+  }
   async function save() {
     setError("");
     setSuccess("");
@@ -2416,22 +2702,11 @@ function ContentPage() {
       else if (key === "header")
         content = { title, tagline: subtitle, logoUrl: currentLogo };
       else if (key === "navigation" || key === "uiCopy") {
-        content = JSON.parse(navigationJson);
-        if (!content || typeof content !== "object" || Array.isArray(content))
-          throw new Error("This content must be a JSON object.");
-        if (
-          key === "uiCopy" &&
-          Object.entries(content).some(
-            ([k, v]) =>
-              typeof k !== "string" ||
-              typeof v !== "string" ||
-              k.length > 200 ||
-              v.length > 500,
-          )
-        )
-          throw new Error(
-            "Each text override must map a text label (max 200 chars) to replacement text (max 500 chars).",
-          );
+        content = Object.fromEntries(
+          labelRows
+            .filter(({ label }) => label.trim())
+            .map(({ label, value }) => [label.trim().slice(0, 200), value.slice(0, 500)]),
+        );
       } else
         content = {
           title,
@@ -2439,6 +2714,7 @@ function ContentPage() {
           subtitle,
           footer,
           logoUrl: currentLogo,
+          imageUrl: currentLogo,
           collegeName,
         };
       const d = await api(`/admin/site-content/${key}`, {
@@ -2514,11 +2790,17 @@ function ContentPage() {
           <label className="field">
             <span>Content section</span>
             <select value={key} onChange={(e) => setKey(e.target.value)}>
-              <option value="home">Home / sign-in</option>
-              <option value="header">Header / branding</option>
-              <option value="footer">Footer</option>
-              <option value="navigation">Navigation labels</option>
-              <option value="uiCopy">Dashboard text overrides</option>
+              {(pages.length ? pages : [
+                { key: "home", label: "Home / sign-in", path: "/" },
+                { key: "header", label: "Header / branding", path: "All pages" },
+                { key: "footer", label: "Footer", path: "All pages" },
+                { key: "navigation", label: "Sidebar navigation", path: "All admin pages" },
+                { key: "uiCopy", label: "Shared text labels", path: "All pages" },
+              ]).map((page) => (
+                <option key={page.key} value={page.key}>
+                  {page.label} ({page.path})
+                </option>
+              ))}
             </select>
           </label>
           {key === "navigation" || key === "uiCopy" ? (
@@ -2528,18 +2810,24 @@ function ContentPage() {
                   ? "Dashboard text overrides JSON"
                   : "Navigation labels JSON"}
               </span>
-              <textarea
-                className="code-textarea"
-                rows="8"
-                value={navigationJson}
-                onChange={(e) => setNavigationJson(e.target.value)}
-              />
-              <small className="muted">
-                Example:{" "}
-                {key === "uiCopy"
-                  ? `{ "Overview": "Dashboard", "Sign out": "Log out" }`
-                  : `{ "/admin/campaigns": "Campaigns", "/admin/uploads": "Document review" }`}
-              </small>
+              <div className="stack">
+                {labelRows.map((row, index) => (
+                  <div className="form-grid" key={`${row.label}-${index}`}>
+                    <Field label="Original text / key" value={row.label} onChange={(e) => {
+                      const next = [...labelRows];
+                      next[index] = { ...row, label: e.target.value };
+                      setLabelRows(next);
+                    }} />
+                    <Field label="Editable replacement" value={row.value} onChange={(e) => {
+                      const next = [...labelRows];
+                      next[index] = { ...row, value: e.target.value };
+                      setLabelRows(next);
+                    }} />
+                    <Button type="button" variant="secondary" onClick={() => setLabelRows(labelRows.filter((_, i) => i !== index))}>Remove</Button>
+                  </div>
+                ))}
+                <Button type="button" variant="secondary" onClick={() => setLabelRows([...labelRows, { label: "", value: "" }])}>Add text label</Button>
+              </div>
             </label>
           ) : (
             <>
@@ -2602,6 +2890,28 @@ function ContentPage() {
               )}
             </>
           )}
+        </div>
+        <div className="version-history">
+          <div className="panel-title">
+            <div>
+              <h2>Pages and tabs</h2>
+              <p className="muted">Every listed page can have an editable title, description, image, and shared text labels.</p>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Page / tab</th><th>Path</th><th>Editable content</th></tr></thead>
+              <tbody>
+                {pages.map((page) => (
+                  <tr key={page.key}>
+                    <td><strong>{page.label}</strong></td>
+                    <td>{page.path}</td>
+                    <td>Text, title, description, image</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
         <div className="button-row">
           <Button onClick={save}>Save draft</Button>
@@ -3287,7 +3597,6 @@ function RouteContent({ user }) {
   if (path.startsWith("/admin/campaigns/"))
     return <CampaignDetails user={user} />;
   if (path === "/admin/miscellaneous") return <MiscellaneousPage />;
-  if (path === "/admin/employees") return <EmployeesPage />;
   if (path === "/admin/templates") return <TemplatesPage />;
   if (path === "/admin/content") return <ContentPage />;
   if (path === "/admin/reports") return <ReportsPage admin />;
@@ -3350,7 +3659,7 @@ export default function App() {
           element={
             <Login
               onLogin={(u) => {
-                setUser(u);
+                setUser(u.user);
                 navigate("/admin");
               }}
             />

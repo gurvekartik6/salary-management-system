@@ -133,6 +133,16 @@ router.get('/download-history', async (_req, res) => {
   res.json({ items });
 });
 
+router.get('/admin/all', requireRole('admin'), async (_req, res) => {
+  const items = await ReportJob.find()
+    .select('-storagePath')
+    .sort({ createdAt: -1 })
+    .limit(500)
+    .lean();
+
+  res.json({ items });
+});
+
 router.get('/:id', async (req, res) => {
   const report = await ReportJob.findOne({
     _id: req.params.id
@@ -143,6 +153,16 @@ router.get('/:id', async (req, res) => {
   }
 
   res.json({ report });
+});
+
+router.delete('/:id', async (req, res) => {
+  const report = await ReportJob.findById(req.params.id).select('+storagePath');
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+  if (report.storagePath) await fs.unlink(report.storagePath).catch(() => {});
+  await ReportDownload.deleteMany({ report: report._id });
+  await ReportJob.deleteOne({ _id: report._id });
+  await audit(req, 'report.deleted', 'report', report._id, 'success', { reference: report.reference });
+  return res.json({ ok: true });
 });
 
 router.get('/:id/download', async (req, res) => {
@@ -209,16 +229,6 @@ router.get('/:id/download', async (req, res) => {
 
   const ext = path.extname(report.storagePath);
   res.download(report.storagePath, `${report.reference}${ext}`);
-});
-
-router.get('/admin/all', requireRole('admin'), async (_req, res) => {
-  const items = await ReportJob.find()
-    .select('-storagePath')
-    .sort({ createdAt: -1 })
-    .limit(500)
-    .lean();
-
-  res.json({ items });
 });
 
 export default router;

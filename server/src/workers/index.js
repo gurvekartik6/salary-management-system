@@ -8,7 +8,8 @@ import {
   DeliveryAttempt,
   UsageRecord,
   BackupRecord,
-  SystemSetting
+  SystemSetting,
+  DispatchOutbox
 } from '../models/index.js';
 import { processUpload } from '../services/documentProcessor.js';
 import { generateReport } from '../services/reportGenerator.js';
@@ -47,7 +48,6 @@ function campaignSnapshotHash(campaign) {
     reference: campaign.reference,
     version: campaign.version,
     recipients: (campaign.recipients || []).map(recipient => ({
-      staffId: recipient.staffId,
       email: recipient.email,
       phone: recipient.phone,
       salaryAmount: recipient.salaryAmount?.toString?.(),
@@ -220,7 +220,7 @@ async function dispatchCampaign(job, queue) {
 
       const idempotencyKey =
         `${campaign._id}:v${campaign.version}:` +
-        `${recipient.staffId}:${channel}`;
+        `${String(recipient.email || '').toLowerCase()}:${channel}`;
 
       const delivery =
         await DeliveryJob.findOneAndUpdate(
@@ -231,7 +231,6 @@ async function dispatchCampaign(job, queue) {
               campaign: campaign._id,
               campaignVersion: campaign.version,
               recipientIndex,
-              staffId: recipient.staffId,
               channel,
               destination,
               status: 'queued',
@@ -814,6 +813,38 @@ export async function startWorkers() {
 
 export async function reconcileQueueTasks() {
   const queue = getNotificationQueue();
+
+  const outboxes = await DispatchOutbox.find({
+    status: { $in: ['pending', 'failed'] },
+    nextAttemptAt: { $lte: new Date() }
+  }).limit(1000).lean();
+  for (const outbox of outboxes) {
+    const campaign = await Campaign.findOne({
+      _id: outbox.campaign,
+      version: outbox.version,
+      status: { $in: ['approved', 'scheduled'] }
+    }).select('_id version scheduleAt').lean();
+    if (!campaign) {
+      await DispatchOutbox.updateOne({ _id: outbox._id }, { $set: { status: 'enqueued' } });
+      continue;
+    }
+    try {
+      const delay = campaign.scheduleAt && campaign.scheduleAt > new Date()
+        ? campaign.scheduleAt.getTime() - Date.now()
+        : 0;
+      await queue.add('dispatch-campaign', { campaignId: String(campaign._id), version: campaign.version }, {
+        jobId: `dispatch-${campaign._id}-v${campaign.version}`,
+        delay,
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: true
+      });
+      await DispatchOutbox.updateOne({ _id: outbox._id }, { $set: { status: 'enqueued', enqueuedAt: new Date(), lastError: undefined }, $inc: { attempts: 1 } });
+      await Campaign.updateOne({ _id: campaign._id, version: campaign.version }, { $set: { dispatchEnqueuedAt: new Date() } });
+    } catch (error) {
+      await DispatchOutbox.updateOne({ _id: outbox._id }, { $set: { status: 'failed', lastError: String(error.message).slice(0, 500), nextAttemptAt: new Date(Date.now() + 60000) }, $inc: { attempts: 1 } });
+    }
+  }
 
   // Do not automatically resend messages whose provider status is uncertain.
   const staleBefore = new Date(

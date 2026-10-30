@@ -5,14 +5,16 @@ async function validateAdminSession(req) {
 
   if (!user || user.role !== 'admin') return null;
 
-  const admin = await Admin.findOne({
+  const account = await Admin.findOne({
     _id: user.id,
     active: true
   })
-    .select('_id email mfaEnabled')
+    .select('_id email role')
     .lean();
 
-  return admin ? user : null;
+  if (!account) return null;
+  if (account.role !== 'admin' || user.role !== 'admin') return null;
+  return { ...user, email: account.email, role: 'admin' };
 }
 
 export async function requireAuth(req, res, next) {
@@ -47,35 +49,10 @@ export function requireRole(...roles) {
         });
       }
 
-      if (!roles.includes('admin')) {
+      if (!roles.includes(user.role)) {
         return res.status(403).json({
-          error: 'Only administrators may access this system'
+          error: 'This account does not have permission to access this resource'
         });
-      }
-
-      if (
-        process.env.NODE_ENV === 'production' &&
-        process.env.ADMIN_MFA_REQUIRED !== 'false'
-      ) {
-        const adminState = await Admin.findById(user.id)
-          .select('mfaEnabled')
-          .lean();
-
-        const isMfaRoute = String(req.originalUrl || '').startsWith(
-          '/api/admin/mfa/'
-        );
-
-        if (!adminState?.mfaEnabled && !isMfaRoute) {
-          return res.status(403).json({
-            error: 'Administrator MFA setup is required before using the system.'
-          });
-        }
-
-        if (adminState?.mfaEnabled && user.mfaVerified !== true) {
-          return res.status(403).json({
-            error: 'Administrator MFA verification is required. Sign in again.'
-          });
-        }
       }
 
       req.user = user;

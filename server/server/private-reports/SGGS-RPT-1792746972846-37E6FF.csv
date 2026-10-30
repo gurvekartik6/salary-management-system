@@ -1,5 +1,0 @@
-campaign,title,staffId,contact,channel,status,attempts,providerMessageId,createdAt,acceptedAt,deliveredAt,errorCode,costINR
-SGGS-CAM-20261023-16C654E0,csv_example4,TEST004,gu••••com,email,sent,1,<3663e334-43c7-eb92-3876-9c73a1262e72@gmail.com>,2026-10-23T09:12:04.421Z,2026-10-23T09:12:16.997Z,,,0
-SGGS-CAM-20261023-16C654E0,csv_example4,TEST003,ak••••com,email,sent,1,<10918b00-9753-1483-1c3d-9adb20328e42@gmail.com>,2026-10-23T09:12:03.398Z,2026-10-23T09:12:16.939Z,,,0
-SGGS-CAM-20261023-16C654E0,csv_example4,TEST002,pr••••com,email,sent,1,<2319804e-1a80-f3ae-5e41-db23b3d6871e@gmail.com>,2026-10-23T09:12:02.576Z,2026-10-23T09:12:16.928Z,,,0
-SGGS-CAM-20261023-16C654E0,csv_example4,TEST001,gu••••com,email,sent,1,<9ce452e7-b4ce-d0f5-60af-83d2a8d63f99@gmail.com>,2026-10-23T09:12:01.760Z,2026-10-23T09:12:16.960Z,,,0

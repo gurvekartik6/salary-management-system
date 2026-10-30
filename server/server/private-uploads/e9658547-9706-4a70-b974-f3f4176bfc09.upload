@@ -1,6 +1,0 @@
-
-ID,Name,Email,Phone Number,Salary Credited Amount,Reason
-EMP001,Rahul Patil,rahul@example.com,9876543210,45000,Regular monthly salary
-EMP002,Priya Shinde,priya@example.com,9876543211,42000,Overtime salary
-EMP003,Amit Jadhav,amit@example.com,9876543212,38500,Salary arrears
-EMP004,Neha Pawar,neha@example.com,9876543213,40000,Other salary adjustment

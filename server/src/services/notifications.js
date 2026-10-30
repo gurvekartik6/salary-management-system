@@ -17,7 +17,7 @@ function required(name) {
 }
 
 function render(template, vars) {
-  return String(template || '').replace(
+  return String(template || '').replace(/\\n/g, '\n').replace(
     /{{\s*([a-zA-Z0-9_]+)\s*}}/g,
     (_, key) => {
       const value = vars[key];
@@ -316,12 +316,15 @@ export function buildMessage(
   options = {},
 ) {
   const vars = {
-    employee_name: recipient.name || '',
-    staff_id: recipient.staffId || '',
-    salary_amount:
+    employee_name: recipient.name || '',    salary_amount:
       recipient.salaryAmount?.toString?.() || '',
     salary_period: recipient.salaryPeriod || '',
     campaign_title: campaign.title || '',
+    salary_details: Object.entries(recipient.salaryDetails || {})
+      .filter(([key, value]) => value !== '' && value !== null && value !== undefined &&
+        !/pan|employee|name|abbr|sl\\.?/i.test(key))
+      .map(([key, value]) => `${key}: ${String(value)}`)
+      .join('\n'),
     college_name: options.collegeName || 'SGGS',
     notification_date: new Date(
       campaign.scheduleAt ||
@@ -332,7 +335,7 @@ export function buildMessage(
     }),
   };
 
-  const bodyTemplate = String(template?.body || '');
+  const bodyTemplate = String(template?.body || '').replace(/\\n/g, '\n');
 
   const variableKeys = [
     ...bodyTemplate.matchAll(/{{\s*([a-zA-Z0-9_]+)\s*}}/g),
@@ -347,7 +350,11 @@ export function buildMessage(
       template?.subject || campaign.title,
       vars,
     ),
-    body: render(bodyTemplate, vars),
+    body: render(bodyTemplate, vars) + (
+      options.channel === 'email' && vars.salary_details
+        ? `\n\nSalary breakdown:\n${vars.salary_details}`
+        : ''
+    ),
     variables,
   };
 }

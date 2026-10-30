@@ -2,6 +2,7 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import {
   Campaign,
+  DispatchOutbox,
   DeliveryJob,
   ExtractedRecord
 } from '../models/index.js';
@@ -48,6 +49,21 @@ router.get('/:id', async (req, res) => {
   res.json({ campaign });
 });
 
+router.delete('/:id', async (req, res) => {
+  const campaign = await Campaign.findById(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  if (!['draft', 'awaiting_approval', 'rejected', 'cancelled', 'failed', 'completed', 'partial_failure'].includes(campaign.status)) {
+    return res.status(409).json({ error: 'Only inactive campaigns can be deleted' });
+  }
+  await Promise.all([
+    DeliveryJob.deleteMany({ campaign: campaign._id }),
+    DispatchOutbox.deleteMany({ campaign: campaign._id }),
+    Campaign.deleteOne({ _id: campaign._id })
+  ]);
+  await audit(req, 'campaign.deleted', 'campaign', campaign._id, 'success', { reference: campaign.reference });
+  return res.json({ ok: true });
+});
+
 router.get('/:id/preview', requireRole('admin'), async (req, res) => {
   try {
     const campaign = await Campaign.findById(req.params.id);
@@ -77,7 +93,6 @@ router.get('/:id/preview', requireRole('admin'), async (req, res) => {
     }
 
     const groups = campaign.recipients.map((recipient, recipientIndex) => ({
-      staffId: recipient.staffId,
       name: recipient.name,
       language: recipient.language,
       salaryAmount:
@@ -212,7 +227,6 @@ router.get('/:id/deliveries', async (req, res) => {
   res.json({
     items: items.map((item) => ({
       id: item._id,
-      staffId: item.staffId,
       contact: item.destination
         ? `${item.destination.slice(0, 2)}••••${item.destination.slice(-3)}`
         : '',
@@ -436,79 +450,6 @@ router.post('/:id/retry-failed', requireRole('admin'), async (req, res) => {
   );
 
   res.json({ ok: true, retried: jobs.length });
-});
-
-router.post('/:id/resolve-exceptions', requireRole('admin'), async (req, res) => {
-  const { recordId, staffId } = req.body || {};
-
-  if (!recordId || !staffId) {
-    return res.status(400).json({
-      error: 'recordId and staffId are required'
-    });
-  }
-
-  const record = await ExtractedRecord.findById(recordId);
-
-  if (!record) {
-    return res.status(404).json({ error: 'Extracted record not found' });
-  }
-
-  const { Employee } = await import('../models/index.js');
-
-  const requestedId = String(staffId).trim().toUpperCase();
-
-  const employee = await Employee.findOne({
-    active: true,
-    $or: [
-      { staffId: requestedId },
-      { payrollId: requestedId }
-    ]
-  });
-
-  if (!employee) {
-    return res.status(404).json({
-      error: 'Active employee not found for that staff ID'
-    });
-  }
-
-  record.staffId = employee.staffId;
-  record.employee = employee._id;
-  record.name = employee.name;
-  record.email = employee.email;
-  record.phone = employee.phone;
-  record.language = employee.language;
-  record.matchStatus = 'matched';
-  record.reviewedBy = req.user.id;
-  record.reviewedAt = new Date();
-
-  record.errors = [];
-
-  if (!record.salaryAmount) {
-    record.errors.push('Salary amount is required');
-  }
-
-  if (!record.email) {
-    record.errors.push('Email is missing from employee directory');
-  }
-
-  if (!record.phone) {
-    record.errors.push('Phone is missing from employee directory');
-  }
-
-  record.valid = record.errors.length === 0;
-
-  await record.save();
-
-  await audit(
-    req,
-    'employee.match.exception_resolved',
-    'extracted-record',
-    record._id,
-    'success',
-    { staffId: employee.staffId }
-  );
-
-  res.json({ record });
 });
 
 export default router;

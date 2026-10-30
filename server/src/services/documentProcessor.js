@@ -10,22 +10,20 @@ import XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import { parse as parseCsv } from 'csv-parse/sync';
 import { ExtractedRecord, Upload, SystemSetting } from '../models/index.js';
+import { normalizePhone } from '../utils/contacts.js';
 
 const execFileAsync = promisify(execFile);
 
 const aliases = {
-  staffId: [
-    'staff id', 'employee id', 'emp id', 'employee code', 'staff code',
-    'payroll id', 'payroll code'
-  ],
-  name: ['name', 'employee name', 'staff name', 'full name'],
+  name: ['name', 'employee name', 'name of employee', 'staff name', 'full name'],
   email: ['email', 'email address', 'e-mail', 'mail id'],
   phone: [
     'phone', 'mobile', 'mobile number', 'phone number',
     'contact number', 'contact'
   ],
   salaryAmount: [
-    'salary', 'salary amount', 'net salary', 'salary paid', 'pay amount'
+    'salary', 'salary amount', 'net salary', 'net pay', 'salary paid',
+    'pay amount', 'amount', 'amount inr', 'salary amount inr'
   ],
   salaryPeriod: [
     'salary period', 'salary month', 'pay period', 'effective date'
@@ -39,6 +37,7 @@ const normalizeKey = value =>
     .trim()
     .toLowerCase()
     .replace(/[_-]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .replace(/\s+/g, ' ');
 
 const normalizedAliases = Object.fromEntries(
@@ -300,7 +299,7 @@ function validateRecord(record) {
     errors.push('Invalid salary amount');
   }
 
-  // Staff ID is optional and does not produce an error by itself.
+  // Email is assigned after administrator confirms the name match.
   return errors;
 }
 
@@ -386,16 +385,26 @@ export async function processUpload(uploadId) {
           );
         }
 
-        const headers = sheet
-          .getRow(1)
-          .values
-          .slice(1)
-          .map(value =>
-            String(cellValue(value) ?? '').trim()
-          );
+        // Salary statements often have institution/title rows before the
+        // actual column headings. Detect the header row instead of assuming row 1.
+        let headerRowNumber = 1;
+        let headers = [];
+        for (let candidate = 1; candidate <= Math.min(sheet.rowCount, 20); candidate++) {
+          const candidateHeaders = sheet.getRow(candidate).values.slice(1)
+            .map(value => String(cellValue(value) ?? '').trim());
+          const normalized = candidateHeaders.map(normalizeKey);
+          if (normalized.some(value => ['name', 'name of employee', 'employee name'].includes(value))) {
+            headerRowNumber = candidate;
+            headers = candidateHeaders;
+            break;
+          }
+        }
+        if (!headers.length) {
+          headers = sheet.getRow(1).values.slice(1).map(value => String(cellValue(value) ?? '').trim());
+        }
 
         for (
-          let rowNumber = 2;
+          let rowNumber = headerRowNumber + 1;
           rowNumber <= sheet.rowCount;
           rowNumber++
         ) {
@@ -509,9 +518,6 @@ export async function processUpload(uploadId) {
       return {
         ...item,
         mapped,
-        staffId: String(mapped.staffId || '')
-          .trim()
-          .toUpperCase(),
         email: String(mapped.email || '')
           .trim()
           .toLowerCase()
@@ -529,30 +535,13 @@ export async function processUpload(uploadId) {
     let duplicateCount = 0;
 
     const docs = [];
-
     for (const item of normalizedRows) {
       const mapped = item.mapped;
       const email = item.email;
 
-      const errors = validateRecord({
-        ...mapped,
-        email
-      });
+      const errors = [];
 
-      const duplicate = Boolean(
-        email && seenEmails.has(email)
-      );
-
-      if (email) {
-        seenEmails.add(email);
-      }
-
-      if (duplicate) {
-        errors.push(
-          'Duplicate email address within this document'
-        );
-        duplicateCount += 1;
-      }
+      let duplicate = false;
 
       const langValue = String(mapped.language || 'en')
         .trim()
@@ -572,6 +561,27 @@ export async function processUpload(uploadId) {
           ? rawAmount
           : undefined;
 
+      const uploadedEmail = String(email || '').trim().toLowerCase();
+      const uploadedPhone = String(mapped.phone || '').trim();
+      const resolvedEmail = uploadedEmail;
+      const resolvedPhone = uploadedPhone
+        ? normalizePhone(uploadedPhone) || uploadedPhone
+        : '';
+
+      errors.push(...validateRecord({
+        ...mapped,
+        email: resolvedEmail,
+        phone: resolvedPhone,
+        salaryAmount
+      }));
+
+      duplicate = Boolean(resolvedEmail && seenEmails.has(resolvedEmail));
+      if (resolvedEmail) seenEmails.add(resolvedEmail);
+      if (duplicate) {
+        errors.push('Duplicate email address within this document');
+        duplicateCount += 1;
+      }
+
       if (errors.length) {
         invalidCount += 1;
       } else {
@@ -584,12 +594,9 @@ export async function processUpload(uploadId) {
         sourceRow: item.sourceRow,
         raw: item.raw,
 
-        // No ID is invented when the CSV does not contain one.
-        staffId: item.staffId || undefined,
-
         name: String(mapped.name || '').trim(),
-        email,
-        phone: String(mapped.phone || '').trim(),
+        email: resolvedEmail,
+        phone: resolvedPhone,
         language,
 
         // A missing salary remains blank.
@@ -598,9 +605,6 @@ export async function processUpload(uploadId) {
 
         valid: errors.length === 0,
         duplicate,
-        matchStatus: errors.length
-          ? 'exception'
-          : 'unmatched',
         errors
       });
     }

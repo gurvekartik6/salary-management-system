@@ -8,8 +8,11 @@ import sharp from 'sharp';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parse as parseCsv } from 'csv-parse/sync';
+import { stringify as stringifyCsv } from 'csv-stringify/sync';
+import XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 import {
-  Employee,
   MiscellaneousContact,
   Sequence,
   Campaign,
@@ -38,6 +41,66 @@ import { recalculateCampaign } from '../workers/index.js';
 import { invalidateSetting } from '../services/settings.js';
 
 const router = Router();
+
+const employeePayrollFields = [
+  'Sl.', 'Abbr', 'Name of Employee', 'PAN No.', 'Basic + Grade pay',
+  'DA', 'HRA', 'TA', 'Wash All.', 'Special Pay', 'GROSS PAY', 'GPF',
+  'CPF', 'PT', 'IT', 'LIC', 'Society', 'Other', 'Bus', 'GLSI',
+  'Bank Loan', 'Group Insurance', 'CM Fund', 'IT 2025-26', 'Saff Adv',
+  'Fest Adv', 'House Maintanace Recovery & Electricity Charges',
+  'SGGS Employee Health Checkup Fees', 'Alumni-24 Reg. Fees',
+  'Sashastra Sena Dwajdin Nidhi 2024-25', 'Revenue Stamp Fees',
+  'Total Deduct', 'NET PAY', 'Phone Number'
+];
+
+function exportEmployeeRows(employees) {
+  return employees.map((employee, index) => {
+    const payroll = employee.payrollDetails || {};
+    const normalized = Object.fromEntries(
+      Object.entries(payroll).map(([key, value]) => [
+        key.toLowerCase().replace(/[_\s.-]/g, ''),
+        value
+      ])
+    );
+    const valueFor = field => {
+      const key = field.toLowerCase().replace(/[_\s.-]/g, '');
+      if (field === 'Sl.') return index + 1;
+      if (field === 'Name of Employee') return employee.name;
+      if (field === 'PAN No.') return employee.panNumber || normalized[key] || '';
+      if (field === 'Phone Number') return employee.phone || '';
+      return normalized[key] ?? '';
+    };
+    return Object.fromEntries(employeePayrollFields.map(field => [field, valueFor(field)]));
+  });
+}
+
+const employeeImportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, ['.csv', '.xlsx', '.xls'].includes(ext));
+  }
+});
+
+const editableSitePages = [
+  { key: 'home', label: 'Home / sign-in', path: '/' },
+  { key: 'header', label: 'Header / branding', path: 'All pages' },
+  { key: 'footer', label: 'Footer', path: 'All pages' },
+  { key: 'navigation', label: 'Sidebar navigation', path: 'All admin pages' },
+  { key: 'uiCopy', label: 'Shared text labels', path: 'All pages' },
+  { key: 'admin', label: 'Admin overview', path: '/admin' },
+  { key: 'campaigns', label: 'Campaigns', path: '/admin/campaigns' },
+  { key: 'uploads', label: 'Document review', path: '/admin/uploads' },
+  { key: 'miscellaneous', label: 'Miscellaneous directory', path: '/admin/miscellaneous' },
+  { key: 'templates', label: 'Message templates', path: '/admin/templates' },
+  { key: 'reports', label: 'Reports', path: '/admin/reports' },
+  { key: 'audit', label: 'Audit logs', path: '/admin/audit' },
+  { key: 'usage', label: 'Usage and costs', path: '/admin/usage' },
+  { key: 'settings', label: 'System settings', path: '/admin/settings' },
+  { key: 'backups', label: 'Backup and restore', path: '/admin/backups' }
+];
+
 
 router.param('id', (req, res, next, value) =>
   mongoose.Types.ObjectId.isValid(value)
@@ -135,347 +198,374 @@ router.get('/dashboard', async (_req, res) => {
   });
 });
 
-// Directory helpers
+router.get('/operations/reconciliation', async (_req, res) => {
+  const staleBefore = new Date(Date.now() - 15 * 60 * 1000);
+  const [staleDeliveries, incompleteCampaigns, missingUsage] = await Promise.all([
+    DeliveryJob.find({ status: 'sending', updatedAt: { $lt: staleBefore } })
+      .select('_id campaign destination channel updatedAt lastErrorCode')
+      .limit(200)
+      .lean(),
+    Campaign.find({ status: 'sending', dispatchPreparedAt: { $exists: false } })
+      .select('_id reference version updatedAt')
+      .limit(200)
+      .lean(),
+    DeliveryJob.aggregate([
+      { $match: { status: { $in: ['sent', 'delivered'] }, providerMessageId: { $exists: true, $ne: '' } } },
+      { $lookup: { from: 'usagerecords', localField: '_id', foreignField: 'deliveryJob', as: 'usage' } },
+      { $match: { 'usage.0': { $exists: false } } },
+      { $project: { _id: 1, campaign: 1, channel: 1, providerMessageId: 1 } },
+      { $limit: 200 }
+    ])
+  ]);
+  res.json({
+    generatedAt: new Date(),
+    staleDeliveries,
+    incompleteCampaigns,
+    missingUsage
+  });
+});
 
-async function nextDirectoryId(key, prefix) {
-  for (let attempt = 0; attempt < 10000; attempt++) {
-    const seq = await Sequence.findOneAndUpdate(
-      { key },
-      { $inc: { value: 1 } },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+router.use('/employees', (_req, res) =>
+  res.status(410).json({ error: 'Employee directory has been removed' })
+);
 
-    const candidate = `${prefix}-${String(seq.value).padStart(6, '0')}`;
-
-    const exists = key === 'employee'
-      ? await Employee.exists({ staffId: candidate })
-      : await MiscellaneousContact.exists({ staffId: candidate });
-
-    if (!exists) return candidate;
-  }
-
-  throw Object.assign(
-    new Error('Could not allocate a unique directory ID. Contact the system administrator.'),
-    { status: 503 }
-  );
+// Employee directory. Employee identity is the normalized email address;
+// no staff/payroll identifier is generated or accepted.
+function directoryQuery(q) {
+  const escaped = String(q || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!escaped) return {};
+  const rx = new RegExp(escaped, 'i');
+  return { $or: [{ name: rx }, { email: rx }, { phone: rx }, { panNumber: rx }] };
 }
 
-function directoryQuery(q) {
-  const escaped = String(q || '')
+function normalizeEmployeeImportRow(row) {
+  const normalized = Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [
+      key.toLowerCase().replace(/[_\s-]/g, ''),
+      String(value ?? '').trim()
+    ])
+  );
+  const name =
+    normalized.name ||
+    normalized.employeename ||
+    normalized.nameofemployee ||
+    normalized.employee;
+  const email = String(normalized.email || normalized.emailaddress || '')
     .trim()
-    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  if (!escaped) return {};
-
-  const rx = new RegExp(escaped, 'i');
-
+    .toLowerCase();
+  const rawPhone =
+    normalized.phone ||
+    normalized.mobile ||
+    normalized.phonenumber ||
+    normalized.mobilenumber ||
+    '';
+  const phone = rawPhone ? normalizePhone(rawPhone) : '';
+  const languageValue = String(normalized.language || 'en').toLowerCase();
+  const language = ['mr', 'marathi'].includes(languageValue)
+    ? 'mr'
+    : ['hi', 'hindi'].includes(languageValue)
+      ? 'hi'
+      : 'en';
+  const panNumber = String(
+    normalized.pan || normalized.panno || normalized.pannumber || ''
+  ).toUpperCase();
   return {
-    $or: [
-      { staffId: rx },
-      { payrollId: rx },
-      { name: rx },
-      { email: rx },
-      { organization: rx }
-    ]
+    name: String(name || '').trim(),
+    email,
+    rawPhone,
+    phone,
+    language,
+    panNumber,
+    payrollDetails: row
   };
 }
 
-// Employee directory
+function canonicalEmployeeName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function parseEmployeeCsvRows(csv) {
+  const parsed = parseCsv(csv, {
+    columns: false,
+    skip_empty_lines: true,
+    trim: true,
+    bom: true,
+    relax_column_count: true
+  });
+  const headerIndex = parsed.findIndex(row =>
+    row.some(cell =>
+      /^(name|name of employee|employee name)$/i.test(
+        String(cell).trim().replace(/\s+/g, ' ')
+      )
+    )
+  );
+  if (headerIndex < 0) throw new Error('Employee name header not found');
+  const headers = parsed[headerIndex].map(cell => String(cell).trim());
+  return parsed.slice(headerIndex + 1).map(row =>
+    Object.fromEntries(headers.map((header, index) => [header, row[index] ?? '']))
+  );
+}
+
+async function importEmployeeRows(rows, userId, { dryRun = false } = {}) {
+  let created = 0;
+  let updated = 0;
+  let rejected = 0;
+  const errors = [];
+  const changes = [];
+  for (const row of rows) {
+    const item = normalizeEmployeeImportRow(row);
+    if (!item.name && !item.email && !item.rawPhone) continue;
+    if (!item.name || (item.email && !isValidEmail(item.email)) || (item.rawPhone && !item.phone)) {
+      rejected++;
+      errors.push({ name: item.name, email: item.email, reason: !item.name ? 'Employee name is required' : item.rawPhone && !item.phone ? 'Invalid phone number' : 'Invalid email address' });
+      continue;
+    }
+    try {
+      const existing = item.email
+        ? await Employee.findOne({ email: item.email })
+        : null;
+      const nameMatch = existing || await Employee.findOne({
+        active: true,
+        name: new RegExp(`^${canonicalEmployeeName(item.name).split(' ').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')}$`, 'i')
+      });
+      if (nameMatch) {
+        const before = nameMatch.toObject();
+        nameMatch.name = item.name;
+        if (item.email) nameMatch.email = item.email;
+        if (item.rawPhone) nameMatch.phone = item.phone;
+        if (item.panNumber) nameMatch.panNumber = item.panNumber;
+        nameMatch.language = item.language;
+        nameMatch.payrollDetails = item.payrollDetails;
+        nameMatch.active = true;
+        nameMatch.source = 'import';
+        nameMatch.updatedBy = userId;
+        if (!dryRun) await nameMatch.save();
+        changes.push({ type: 'update', employeeId: String(nameMatch._id), before });
+        updated++;
+      } else {
+        const createdEmployee = {
+          name: item.name,
+          email: item.email || '',
+          phone: item.phone,
+          panNumber: item.panNumber,
+          language: item.language,
+          payrollDetails: item.payrollDetails,
+          active: true,
+          source: 'import',
+          updatedBy: userId
+        };
+        if (dryRun) {
+          changes.push({ type: 'create', employee: createdEmployee });
+        } else {
+          const createdRecord = await Employee.create(createdEmployee);
+          changes.push({ type: 'create', employeeId: String(createdRecord._id), employee: createdEmployee });
+        }
+        created++;
+      }
+    } catch (error) {
+      rejected++;
+      errors.push({ name: item.name, email: item.email, reason: error.code === 11000 ? 'Email already belongs to another employee' : 'Could not save employee record' });
+    }
+  }
+  return { created, updated, rejected, errors, changes };
+}
 
 router.get('/employees', async (req, res) => {
   const page = Math.max(1, Number(req.query.page || 1));
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
-  const filter = directoryQuery(req.query.q);
-
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 100)));
+  const filter = {
+    ...directoryQuery(req.query.q),
+    ...(req.query.status === 'inactive' ? { active: false } :
+      req.query.status === 'all' ? {} : { active: true })
+  };
   const [items, total] = await Promise.all([
-    Employee.find(filter)
-      .sort({ staffId: 1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean(),
+    Employee.find(filter).sort({ name: 1 }).skip((page - 1) * limit).limit(limit).lean(),
     Employee.countDocuments(filter)
   ]);
-
   res.json({ items, page, limit, total });
+});
+
+router.get('/employees/export/:format', async (req, res) => {
+  const format = String(req.params.format || '').toLowerCase();
+  if (!['csv', 'xlsx', 'pdf'].includes(format)) {
+    return res.status(400).json({ error: 'Export format must be csv, xlsx or pdf' });
+  }
+
+  const filter = {
+    ...directoryQuery(req.query.q),
+    ...(req.query.status === 'inactive' ? { active: false } : {})
+  };
+  const employees = await Employee.find(filter).sort({ name: 1 }).lean();
+  const rows = exportEmployeeRows(employees);
+  const filename = `sggs-employees-${new Date().toISOString().slice(0, 10)}`;
+
+  if (format === 'csv') {
+    const content = stringifyCsv(rows, { header: true, columns: employeePayrollFields });
+    res.type('text/csv').attachment(`${filename}.csv`).send(content);
+    return;
+  }
+
+  if (format === 'xlsx') {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Employees');
+    sheet.columns = employeePayrollFields.map(header => ({ header, key: header, width: Math.min(32, Math.max(12, header.length + 2)) }));
+    rows.forEach(row => sheet.addRow(row));
+    sheet.getRow(1).font = { bold: true };
+    sheet.views = [{ state: 'frozen', ySplit: 1 }];
+    res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.attachment(`${filename}.xlsx`);
+    await workbook.xlsx.write(res);
+    res.end();
+    return;
+  }
+
+  const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 24 });
+  res.type('application/pdf').attachment(`${filename}.pdf`);
+  doc.pipe(res);
+  doc.fontSize(14).text('SGGS Employee Directory', { align: 'center' });
+  doc.fontSize(8).text(`Generated: ${new Date().toLocaleString('en-IN')}`, { align: 'center' });
+  doc.moveDown();
+  rows.forEach((row, index) => {
+    if (index > 0) doc.moveDown(0.35);
+    doc.fontSize(9).text(`${index + 1}. ${row['Name of Employee']} | ${row['PAN No.'] || 'No PAN'} | ${row['Phone Number'] || 'No phone'}`);
+    doc.fontSize(7).text(employeePayrollFields.slice(4, -1).map(field => `${field}: ${row[field] ?? ''}`).join('  •  '));
+    if (doc.y > 540 && index < rows.length - 1) doc.addPage();
+  });
+  doc.end();
 });
 
 router.post('/employees', async (req, res) => {
   const name = String(req.body?.name || '').trim();
-
-  if (!name) {
-    return res.status(400).json({ error: 'Employee name is required' });
-  }
-
-  const payrollId = String(req.body?.payrollId || '').trim().toUpperCase();
   const email = String(req.body?.email || '').trim().toLowerCase();
   const rawPhone = String(req.body?.phone || '').trim();
-  const phone = normalizePhone(rawPhone);
-
-  const language = ['en', 'mr', 'hi'].includes(req.body?.language)
-    ? req.body.language
-    : 'en';
-
-  if (!isValidEmail(email)) {
-    return res.status(400).json({ error: 'Invalid email address' });
+  const phone = rawPhone ? normalizePhone(rawPhone) : '';
+  const language = ['en', 'mr', 'hi'].includes(req.body?.language) ? req.body.language : 'en';
+  if (!name) return res.status(400).json({ error: 'Employee name is required' });
+  if (!isValidEmail(email)) return res.status(400).json({ error: 'A valid employee email is required' });
+  if (rawPhone && !phone) return res.status(400).json({ error: 'Invalid phone number' });
+  const existing = await Employee.findOne({ email });
+  if (existing) return res.status(409).json({ error: 'An employee with this email already exists' });
+  const panNumber = String(req.body?.panNumber || '').trim().toUpperCase();
+  const payrollDetails = req.body?.payrollDetails;
+  if (payrollDetails !== undefined && (typeof payrollDetails !== 'object' || Array.isArray(payrollDetails))) {
+    return res.status(400).json({ error: 'Payroll details must be an object' });
   }
+  const employee = await Employee.create({ name, email, phone, panNumber, language, payrollDetails: payrollDetails || {}, active: true, source: 'manual', updatedBy: req.user.id });
+  await audit(req, 'employee.created', 'employee', employee._id, 'success', { email });
+  res.status(201).json({ employee });
+});
 
-  if (rawPhone && !phone) {
-    return res.status(400).json({
-      error: 'Mobile number must be a valid international number or a 10-digit Indian mobile number'
-    });
-  }
-
-  if (payrollId) {
-    const existing = await Employee.findOne({
-      $or: [{ payrollId }, { staffId: payrollId }]
-    });
-
-    if (existing) {
-      existing.payrollId = payrollId;
-      existing.name = name;
-      existing.email = email;
-      existing.phone = phone;
-      existing.language = language;
-      existing.active = req.body?.active !== false;
-      existing.source = 'manual';
-      existing.updatedBy = req.user.id;
-
-      await existing.save();
-
-      await audit(
-        req,
-        'employee.updated',
-        'employee',
-        existing._id,
-        'success',
-        { staffId: existing.staffId, payrollId }
-      );
-
-      return res.json({ employee: existing, created: false });
+router.post('/employees/import-file', employeeImportUpload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Choose a CSV or Excel file' });
+  const ext = path.extname(req.file.originalname).toLowerCase();
+  let rows = [];
+  try {
+    if (ext === '.csv') {
+      rows = parseEmployeeCsvRows(req.file.buffer.toString('utf8'));
     }
+    else {
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+    }
+  } catch {
+    return res.status(400).json({ error: 'Could not read the employee import file' });
   }
-
-  const staffId = await nextDirectoryId('employee', 'EMP');
-
-  const employee = await Employee.create({
-    staffId,
-    payrollId: payrollId || undefined,
-    name,
-    email,
-    phone,
-    language,
-    active: req.body?.active !== false,
-    source: 'manual',
-    updatedBy: req.user.id
-  });
-
-  await audit(
-    req,
-    'employee.created',
-    'employee',
-    employee._id,
-    'success',
-    { staffId, payrollId }
-  );
-
-  res.status(201).json({ employee, created: true });
+  if (rows.length > 20000) return res.status(400).json({ error: 'Import is limited to 20,000 rows' });
+  const dryRun = String(req.query.preview || req.body?.preview || '').toLowerCase() === 'true';
+  const result = await importEmployeeRows(rows, req.user.id, { dryRun });
+  let importRecord;
+  if (!dryRun) {
+    importRecord = await EmployeeImport.create({ createdBy: req.user.id, sourceName: req.file.originalname, rowCount: rows.length, ...result, errors: result.errors.slice(0, 100) });
+  }
+  await audit(req, dryRun ? 'employee.file.previewed' : 'employee.file.imported', 'employee-directory', importRecord?._id || '', 'success', { filename: req.file.originalname, rows: rows.length, created: result.created, updated: result.updated, rejected: result.rejected });
+  res.json({ rows: rows.length, created: result.created, updated: result.updated, rejected: result.rejected, errors: result.errors.slice(0, 100), preview: dryRun, importId: importRecord?._id });
 });
 
 router.post('/employees/import-csv', async (req, res) => {
   const csv = String(req.body?.csv || '');
-
-  if (!csv || csv.length > 5_000_000) {
-    return res.status(400).json({
-      error: 'CSV content is required and must be under 5 MB'
-    });
-  }
-
+  if (!csv || csv.length > 5_000_000) return res.status(400).json({ error: 'CSV content is required and must be under 5 MB' });
   let rows;
-
-  try {
-    rows = parseCsv(csv, {
-      columns: true,
-      skip_empty_lines: true,
-      trim: true,
-      bom: true
-    });
-  } catch {
-    return res.status(400).json({ error: 'Could not parse CSV' });
+  try { rows = parseEmployeeCsvRows(csv); }
+  catch { return res.status(400).json({ error: 'Could not parse CSV' }); }
+  if (rows.length > 20000) return res.status(400).json({ error: 'Employee import is limited to 20,000 rows per batch' });
+  const dryRun = String(req.query.preview || req.body?.preview || '').toLowerCase() === 'true';
+  const result = await importEmployeeRows(rows, req.user.id, { dryRun });
+  let importRecord;
+  if (!dryRun) {
+    importRecord = await EmployeeImport.create({ createdBy: req.user.id, sourceName: 'csv', rowCount: rows.length, ...result, errors: result.errors.slice(0, 100) });
   }
+  await audit(req, dryRun ? 'employee.directory.previewed' : 'employee.directory.imported', 'employee-directory', importRecord?._id || '', 'success', { rows: rows.length, created: result.created, updated: result.updated, rejected: result.rejected });
+  res.json({ rows: rows.length, created: result.created, updated: result.updated, rejected: result.rejected, errors: result.errors.slice(0, 100), preview: dryRun, importId: importRecord?._id });
+});
 
-  if (rows.length > 20000) {
-    return res.status(400).json({
-      error: 'Employee import is limited to 20,000 rows per batch'
-    });
-  }
-
-  let upserted = 0;
-  let rejected = 0;
-
-  for (const row of rows) {
-    const norm = Object.fromEntries(
-      Object.entries(row).map(([key, value]) => [
-        key.toLowerCase().replace(/[_\s-]/g, ''),
-        String(value || '').trim()
-      ])
-    );
-
-    const payrollId = String(
-      norm.payrollid ||
-      norm.staffid ||
-      norm.employeeid ||
-      norm.empid ||
-      norm.employeecode ||
-      ''
-    ).trim().toUpperCase();
-
-    const name = norm.name || norm.employeename;
-
-    if (!name) {
-      rejected++;
-      continue;
+router.post('/employees/imports/:id/rollback', async (req, res) => {
+  const batch = await EmployeeImport.findOne({ _id: req.params.id, status: 'completed' });
+  if (!batch) return res.status(404).json({ error: 'Import batch not found or already rolled back' });
+  for (const change of [...(batch.changes || [])].reverse()) {
+    if (change.type === 'create' && change.employeeId) {
+      const referenced = await Campaign.exists({ 'recipients.employee': change.employeeId });
+      if (!referenced) await Employee.deleteOne({ _id: change.employeeId });
+    } else if (change.type === 'update' && change.employeeId && change.before) {
+      const { _id, __v, createdAt, updatedAt, ...restore } = change.before;
+      await Employee.updateOne({ _id: change.employeeId }, { $set: restore }, { runValidators: true });
     }
-
-    const email = String(
-      norm.email || norm.emailaddress || ''
-    ).trim().toLowerCase();
-
-    const rawPhone = String(
-      norm.phone || norm.mobile || norm.mobilenumber || ''
-    ).trim();
-
-    const phone = normalizePhone(rawPhone);
-
-    const language = ['mr', 'marathi'].includes(
-      (norm.language || '').toLowerCase()
-    )
-      ? 'mr'
-      : ['hi', 'hindi'].includes(
-          (norm.language || '').toLowerCase()
-        )
-        ? 'hi'
-        : 'en';
-
-    const existing = payrollId
-      ? await Employee.findOne({
-          $or: [{ payrollId }, { staffId: payrollId }]
-        })
-      : null;
-
-    if (existing) {
-      existing.payrollId = payrollId || existing.payrollId;
-      existing.name = name;
-      existing.email = email;
-      existing.phone = phone;
-      existing.language = language;
-      existing.active = true;
-      existing.source = 'import';
-      existing.updatedBy = req.user.id;
-
-      await existing.save();
-    } else {
-      const staffId = await nextDirectoryId('employee', 'EMP');
-
-      await Employee.create({
-        staffId,
-        payrollId: payrollId || undefined,
-        name,
-        email,
-        phone,
-        language,
-        active: true,
-        source: 'import',
-        updatedBy: req.user.id
-      });
-    }
-
-    upserted++;
   }
-
-  await audit(
-    req,
-    'employee.directory.imported',
-    'employee-directory',
-    '',
-    'success',
-    { rows: rows.length, upserted, rejected }
-  );
-
-  res.json({ rows: rows.length, upserted, rejected });
+  batch.status = 'rolled_back';
+  batch.rolledBackAt = new Date();
+  batch.rolledBackBy = req.user.id;
+  await batch.save();
+  await audit(req, 'employee.directory.rollback', 'employee-import', batch._id, 'success');
+  res.json({ ok: true, importId: batch._id });
 });
 
 router.patch('/employees/:id', async (req, res) => {
-  const allowed = [
-    'name',
-    'email',
-    'phone',
-    'language',
-    'active',
-    'payrollId'
-  ];
-
+  const allowed = ['name', 'email', 'phone', 'panNumber', 'language', 'active', 'payrollDetails'];
   const update = {};
-
-  for (const key of allowed) {
-    if (Object.hasOwn(req.body || {}, key)) {
-      update[key] = req.body[key];
-    }
-  }
-
-  if (
-    update.language !== undefined &&
-    !['en', 'mr', 'hi'].includes(update.language)
-  ) {
-    return res.status(400).json({
-      error: 'Language must be en, mr or hi'
-    });
-  }
-
+  for (const key of allowed) if (Object.hasOwn(req.body || {}, key)) update[key] = req.body[key];
+  if (update.name !== undefined) update.name = String(update.name).trim();
   if (update.email !== undefined) {
     update.email = String(update.email).trim().toLowerCase();
-
-    if (!isValidEmail(update.email)) {
-      return res.status(400).json({ error: 'Invalid email address' });
-    }
+    if (!isValidEmail(update.email)) return res.status(400).json({ error: 'Invalid email address' });
   }
-
+  if (update.panNumber !== undefined) {
+    update.panNumber = String(update.panNumber || '').trim().toUpperCase();
+  }
+  if (update.payrollDetails !== undefined && (typeof update.payrollDetails !== 'object' || Array.isArray(update.payrollDetails))) {
+    return res.status(400).json({ error: 'Payroll details must be an object' });
+  }
   if (update.phone !== undefined) {
     const raw = String(update.phone || '').trim();
-    update.phone = normalizePhone(raw);
-
-    if (raw && !update.phone) {
-      return res.status(400).json({ error: 'Invalid phone number' });
-    }
+    update.phone = raw ? normalizePhone(raw) : '';
+    if (raw && !update.phone) return res.status(400).json({ error: 'Invalid phone number' });
   }
-
-  if (update.payrollId !== undefined) {
-    update.payrollId = String(update.payrollId || '')
-      .trim()
-      .toUpperCase();
-  }
-
+  if (update.language !== undefined && !['en','mr','hi'].includes(update.language))
+    return res.status(400).json({ error: 'Language must be en, mr or hi' });
+  if (update.active === false) update.deactivatedAt = new Date();
+  if (update.active === true) update.deactivatedAt = null;
   update.updatedBy = req.user.id;
-
-  const employee = await Employee.findByIdAndUpdate(
-    req.params.id,
-    { $set: update },
-    { new: true, runValidators: true }
-  );
-
-  if (!employee) {
-    return res.status(404).json({ error: 'Employee not found' });
+  try {
+    const employee = await Employee.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
+    if (!employee) return res.status(404).json({ error: 'Employee not found' });
+    await audit(req, update.active === false ? 'employee.deactivated' : 'employee.updated', 'employee', employee._id, 'success', { email: employee.email });
+    res.json({ employee });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: 'That email address is already assigned to another employee' });
+    throw error;
   }
+});
 
-  await audit(
-    req,
-    'employee.updated',
-    'employee',
-    employee._id,
-    'success',
-    { staffId: employee.staffId }
-  );
-
-  res.json({ employee });
+router.delete('/employees/:id', async (req, res) => {
+  const employee = await Employee.findById(req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+  employee.active = false;
+  employee.deactivatedAt = new Date();
+  employee.updatedBy = req.user.id;
+  await employee.save();
+  await audit(req, 'employee.deleted', 'employee', employee._id, 'success', {
+    email: employee.email
+  });
+  res.json({ employee, deleted: true });
 });
 
 // Miscellaneous contacts
@@ -483,11 +573,13 @@ router.patch('/employees/:id', async (req, res) => {
 router.get('/miscellaneous', async (req, res) => {
   const page = Math.max(1, Number(req.query.page || 1));
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
-  const filter = directoryQuery(req.query.q);
+  const q = String(req.query.q || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rx = q ? new RegExp(q, 'i') : null;
+  const filter = rx ? { $or: [{ name: rx }, { email: rx }, { phone: rx }, { organization: rx }] } : {};
 
   const [items, total] = await Promise.all([
     MiscellaneousContact.find(filter)
-      .sort({ staffId: 1 })
+      .sort({ name: 1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean(),
@@ -522,10 +614,7 @@ router.post('/miscellaneous', async (req, res) => {
     ? req.body.language
     : 'en';
 
-  const staffId = await nextDirectoryId('miscellaneous', 'MISC');
-
   const contact = await MiscellaneousContact.create({
-    staffId,
     name,
     organization: String(req.body?.organization || '').trim().slice(0, 200),
     email,
@@ -541,7 +630,7 @@ router.post('/miscellaneous', async (req, res) => {
     'miscellaneous-contact',
     contact._id,
     'success',
-    { staffId }
+    {}
   );
 
   res.status(201).json({ contact });
@@ -573,7 +662,7 @@ router.patch('/miscellaneous/:id', async (req, res) => {
     'miscellaneous-contact',
     contact._id,
     'success',
-    { staffId: contact.staffId, active: contact.active }
+    { active: contact.active }
   );
 
   res.json({ contact });
@@ -680,6 +769,30 @@ router.post('/bills', async (req, res) => {
   );
 
   res.status(201).json({ bill });
+});
+
+router.patch('/bills/:id', async (req, res) => {
+  const bill = await Bill.findById(req.params.id);
+  if (!bill) return res.status(404).json({ error: 'Bill not found' });
+  if (bill.status === 'sent') return res.status(409).json({ error: 'Sent bills are immutable; create a credit/cancellation record instead.' });
+  const allowed = ['title','billNumber','recipientName','recipientEmail','organization','amount','issueDate','dueDate','notes'];
+  for (const key of allowed) if (Object.hasOwn(req.body || {}, key)) bill[key] = req.body[key];
+  if (bill.recipientEmail) bill.recipientEmail = String(bill.recipientEmail).trim().toLowerCase();
+  if (!isValidEmail(bill.recipientEmail)) return res.status(400).json({ error: 'Invalid recipient email' });
+  if (!Number.isFinite(Number(bill.amount)) || Number(bill.amount) < 0) return res.status(400).json({ error: 'Invalid bill amount' });
+  bill.updatedBy = req.user.id;
+  await bill.save();
+  await audit(req, 'bill.updated', 'bill', bill._id, 'success', { reference: bill.reference });
+  res.json({ bill });
+});
+
+router.delete('/bills/:id', async (req, res) => {
+  const bill = await Bill.findById(req.params.id);
+  if (!bill) return res.status(404).json({ error: 'Bill not found' });
+  if (bill.status === 'sent') return res.status(409).json({ error: 'Sent bills must be retained and cannot be deleted.' });
+  await Bill.deleteOne({ _id: bill._id });
+  await audit(req, 'bill.deleted', 'bill', bill._id, 'success', { reference: bill.reference, status: bill.status });
+  res.json({ ok: true });
 });
 
 router.post('/bills/:id/send', async (req, res) => {
@@ -800,6 +913,18 @@ router.get('/templates', async (req, res) => {
   res.json({ items });
 });
 
+router.delete('/templates/:id', async (req, res) => {
+  const template = await Template.findById(req.params.id);
+  if (!template) return res.status(404).json({ error: 'Template not found' });
+  await Template.deleteOne({ _id: template._id });
+  await audit(req, 'template.deleted', 'template', template._id, 'success', {
+    key: template.key,
+    channel: template.channel,
+    language: template.language
+  });
+  return res.json({ ok: true });
+});
+
 router.post('/templates', async (req, res) => {
   const {
     key = 'salary_notification',
@@ -821,6 +946,8 @@ router.post('/templates', async (req, res) => {
       error: 'Valid channel, language and body are required'
     });
   }
+
+  const normalizedBody = body.replace(/\\n/g, '\n');
 
   if (channel === 'whatsapp' && !String(whatsappTemplateName).trim()) {
     return res.status(400).json({
@@ -846,7 +973,6 @@ router.post('/templates', async (req, res) => {
 
   const allowedPlaceholders = new Set([
     'employee_name',
-    'staff_id',
     'salary_amount',
     'salary_period',
     'campaign_title',
@@ -855,7 +981,7 @@ router.post('/templates', async (req, res) => {
   ]);
 
   const usedPlaceholders = [
-    ...body.matchAll(/{{\s*([a-zA-Z0-9_]+)\s*}}/g)
+    ...normalizedBody.matchAll(/{{\s*([a-zA-Z0-9_]+)\s*}}/g)
   ].map(match => match[1]);
 
   const unknownPlaceholder = usedPlaceholders.find(
@@ -883,7 +1009,7 @@ router.post('/templates', async (req, res) => {
     language,
     version: (previous[0]?.version || 0) + 1,
     subject: String(subject),
-    body,
+    body: normalizedBody,
     whatsappTemplateName: String(whatsappTemplateName),
     whatsappLanguageCode: String(whatsappLanguageCode),
     status: 'draft',
@@ -1048,6 +1174,31 @@ router.post(
         { bytes: req.file.size, format: meta.format }
       );
 
+      router.delete('/site-assets/:name', async (req, res, next) => {
+        try {
+          const name = path.basename(String(req.params.name || ''));
+          if (!/^[a-f0-9-]+\.webp$/i.test(name)) {
+            return res.status(400).json({ error: 'Invalid site asset name' });
+          }
+          const assetUrl = `/site-assets/${name}`;
+          const referenced = await SiteContent.exists({
+            'content.logoUrl': assetUrl
+          });
+          if (referenced) {
+            return res.status(409).json({
+              error: 'This image is still used by website content. Replace or remove it from the content first.'
+            });
+          }
+          await fs.unlink(path.join(assetDir, name)).catch(error => {
+            if (error.code !== 'ENOENT') throw error;
+          });
+          await audit(req, 'site-asset.deleted', 'site-asset', name, 'success', {});
+          res.json({ deleted: true });
+        } catch (error) {
+          next(error);
+        }
+      });
+
       res.status(201).json({ url: `/site-assets/${name}`, name });
     } catch (error) {
       next(error);
@@ -1121,7 +1272,7 @@ router.get('/site-content', async (_req, res) => {
     }
   }
 
-  res.json({ content: latest });
+  res.json({ content: latest, pages: editableSitePages });
 });
 
 router.put('/site-content/:key', async (req, res) => {
